@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Liberen a Willy · Orca generativa</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#03060d;}
+  canvas{display:block;}
+  #hint{
+    position:fixed;left:50%;bottom:18px;transform:translateX(-50%);
+    font:11px/1.6 ui-monospace,Menlo,Consolas,monospace;
+    color:#7fb6d8;letter-spacing:.2em;text-transform:uppercase;
+    opacity:.5;pointer-events:none;user-select:none;white-space:nowrap;
+  }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+</head>
+<body>
+<div id="hint">mueve el mouse &nbsp;·&nbsp; click para llamar a Willy</div>
+<script>
+/* ============================================================
+   LIBEREN A WILLY  ·  orca generativa en nube de puntos 3D
+   (Y negativa: dorsal arriba, panza abajo en pantalla)
+   ============================================================ */
+
+let t = 0;
+let phase = 0;
+let amp = 1;
+let energy = 0;
+
+let groups = [];
+let bubbles = [];
+let plankton = [];
+let camTheta = 0.4, camPhi = 0.08;
+
+const LEN   = 1.0;
+const RMAX  = 0.105;
+const A_UND = 0.075;
+const K_UND = 5.2;
+const W_UND = 1.9;
+
+const G1 = 0.6180339887498949;
+const G2 = 0.7548776662466927;
+const G3 = 0.5698402909980532;
+
+function setup(){
+  createCanvas(windowWidth, windowHeight, WEBGL);
+  strokeWeight(1.5);
+  noFill();
+  buildWhale();
+  initPlankton();
+}
+function windowResized(){ resizeCanvas(windowWidth, windowHeight); }
+
+/* ============================================================
+   GEOMETRÍA
+   ============================================================ */
+
+function profile(u){
+  const s = Math.pow(Math.sin(Math.PI * Math.pow(u, 0.62)), 0.85);
+  return s * (1.0 - 0.55 * Math.pow(u, 4));
+}
+
+function angDist(a, b){
+  let d = Math.abs(a - b) % (Math.PI * 2);
+  return d > Math.PI ? Math.PI * 2 - d : d;
+}
+
+function whiteAmount(u, th){
+  const s = Math.sin(th);
+
+  if (u > 0.05 && u < 0.84){
+    const flare = 0.45 - 0.28 * Math.exp(-Math.pow((u - 0.63) / 0.14, 2));
+    if (s < -flare) return 1;
+  }
+  if (u < 0.075 && s < 0.05) return 1;
+
+  const dEye = Math.min(angDist(th, 0.32), angDist(th, Math.PI - 0.32));
+  const du1 = (u - 0.135) / 0.052;
+  const dt1 = dEye / 0.52;
+  if (du1 * du1 + dt1 * dt1 < 1) return 1;
+
+  const dSad = Math.min(angDist(th, 1.02), angDist(th, Math.PI - 1.02));
+  const du2 = (u - 0.745) / 0.075;
+  const dt2 = dSad / 0.33;
+  if (du2 * du2 + dt2 * dt2 < 1) return 1;
+
+  return 0;
+}
+
+/* ------------------------------------------------------------ */
+function buildWhale(){
+  const buckets = new Map();
+
+  // luz principal (en espacio local de la orca)
+  const Lx = -0.32, Ly = 0.82, Lz = 0.48;
+  const Ln = Math.hypot(Lx, Ly, Lz);
+
+  function add(px, py, pz, nx, ny, nz, w, u, k){
+    let nl = Math.hypot(nx, ny, nz); if (nl < 1e-6) nl = 1;
+    nx /= nl; ny /= nl; nz /= nl;
+
+    const d = Math.max(0, (nx * Lx + ny * Ly + nz * Lz) / Ln);
+    let b = 0.20 + 1.05 * d + 0.28 * Math.pow(1 - Math.abs(ny), 4);
+    b = Math.min(1.30, b);
+
+    const wq = Math.round(w * 3) / 3;
+    const bq = Math.max(0.2, Math.round(b * 5) / 5);
+
+    const r  = Math.min(1, ((1 - wq) * 0.055 + wq * 0.92) * bq);
+    const g  = Math.min(1, ((1 - wq) * 0.300 + wq * 1.00) * bq);
+    const bl = Math.min(1, ((1 - wq) * 0.660 + wq * 1.00) * bq);
+
+    const key = wq.toFixed(2) + '|' + bq.toFixed(2);
+    let bk = buckets.get(key);
+    if (!bk){ bk = { r: r * 255, g: g * 255, b: bl * 255, pts: [] }; buckets.set(key, bk); }
+    bk.pts.push({ x: px, y: py, z: pz, u: u, k: k });
+  }
+
+  /* ---- 1 · CUERPO ---- */
+  const NB = 6500;
+  for (let i = 0; i < NB; i++){
+    const u  = (i * G1) % 1;
+    const th = ((i * G2) % 1) * TWO_PI;
+
+    const r  = RMAX * profile(u);
+    const ry = r * 0.88;
+    const rx = r;
+    const st = Math.sin(th), ct = Math.cos(th);
+
+    const x = (0.5 - u) * LEN;
+    const y = -ry * st;     
+    const z =  rx * ct;
+
+    add(x, y, z, 0, -st / 0.88, ct, whiteAmount(u, th), u, 0);
+  }
+
+  /* ---- 2 · ALETA CAUDAL  ---- */
+  const NF = 1700;
+  for (let i = 0; i < NF; i++){
+    const s    = ((i * G1) % 1) * 2 - 1;
+    const q    = (i * G2) % 1;
+    const side = ((i * G3) % 1) < 0.5 ? -1 : 1;
+
+    const absS = Math.abs(s);
+    const span = 0.155;
+
+    const le    = 0.022 + 0.105 * Math.pow(absS, 1.25);
+    const chord = 0.135
+                * Math.pow(Math.max(0, 1 - Math.pow(s, 4)), 0.45)
+                * (1 - 0.38 * Math.exp(-Math.pow(s / 0.18, 2)));
+
+    const fx = le + q * chord;
+    const fy = -side * 0.0065 * Math.pow(Math.max(0, 1 - s * s), 0.35);
+    const fz = s * span;
+
+    const w = side < 0 ? 1.0 : 0.10;
+    const ny = side < 0 ? 0.6 : 1.0;
+
+    add(fx, fy, fz, 0, -ny, 0.15 * s, w, 0, 1); // <— normal Y negada
+  }
+
+  /* ---- 3 · ALETA DORSAL ---- */
+  const NDF = 800;
+  const xF = 0.048, xB = -0.128, xTip = -0.062;
+  const hFin = 0.185, yTop = 0.065;
+
+  for (let i = 0; i < NDF; i++){
+    const q    = (i * G1) % 1;
+    const wq   = (i * G2) % 1;
+    const side = ((i * G3) % 1) < 0.5 ? -1 : 1;
+
+    const xL = xF + (xTip - xF) * Math.pow(q, 1.15);
+    const xR = xB + (xTip - xB) * Math.pow(q, 0.72);
+
+    const x = xL + (xR - xL) * wq;
+    const y = -(yTop + hFin * q);
+    const z = side * 0.010 * Math.pow(1 - q, 0.5);
+
+    add(x, y, z, 0.25 * (1 - q), -0.18, side, 0.04, 0.54, 0);
+  }
+
+  /* ---- 4 · ALETAS PECTORALES ---- */
+  const NFL = 560;
+  for (let sgn = -1; sgn <= 1; sgn += 2){
+    for (let i = 0; i < NFL; i++){
+      const p    = (i * G1) % 1;
+      const c    = ((i * G2) % 1) * 2 - 1;
+      const side = ((i * G3) % 1) < 0.5 ? -1 : 1;
+
+      const fLen = 0.175;
+      const wid  = 0.055 * Math.pow(Math.max(0, 1 - Math.pow(p, 3.2)), 0.5);
+
+      const lx = fLen * p;
+      const lz = wid * c;
+
+      const th = -110 * Math.PI / 180;
+      const ct = Math.cos(th), stt = Math.sin(th);
+      const px =  lx * ct + lz * stt;
+      const pz = -lx * stt + lz * ct;
+      const py = 0.05 * p + 0.02;
+
+      const bx = 0.20, by = 0.025, bz = 0.082;
+
+      add(bx + px, by + py, sgn * (bz + pz),
+          0.1, -side * 0.9, 0.2,
+          side < 0 ? 0.18 : 0.03,
+          0.30, 0);
+    }
+  }
+
+  groups = Array.from(buckets.values());
+}
+
+/* ============================================================
+   ONDULACIÓN (Signo negativo, para que acompañe al cuerpo)
+   ============================================================ */
+function und(u){
+  return -amp * A_UND * Math.pow(u, 2.2) * Math.sin(K_UND * u - phase);
+}
+function undD(u){
+  return -amp * A_UND * (
+      2.2 * Math.pow(u, 1.2) * Math.sin(K_UND * u - phase)
+    + Math.pow(u, 2.2) * K_UND * Math.cos(K_UND * u - phase)
+  );
+}
+
+/* ============================================================
+   RENDER
+   ============================================================ */
+function draw(){
+  background(3, 6, 13);
+
+  const dt = Math.min(deltaTime, 50) / 1000;
+  t += dt;
+
+  energy *= Math.pow(0.22, dt);
+  phase  += dt * W_UND * (1 + energy * 2.4);
+  amp     = 1 + energy * 0.85;
+
+  const camZ = height * 1.9;
+  camera(0, 0, camZ, 0, 0, 0, 0, 1, 0);
+  perspective(PI / 6, width / height, camZ * 0.03, camZ * 4);
+
+  const tx = map(mouseX, 0, width,  -0.85, 0.85, true);
+  const ty = map(mouseY, 0, height, -0.50, 0.50, true);
+  camTheta = lerp(camTheta, tx, 0.045);
+  camPhi   = lerp(camPhi,   ty, 0.045);
+
+  drawPlankton();
+
+  push();
+  const S = Math.min(width * 0.68, height * 1.4);
+  scale(S);
+
+  rotateY(camTheta + Math.sin(t * 0.11) * 0.30 + t * 0.05);
+  rotateX(camPhi   + Math.sin(t * 0.17) * 0.10);
+  rotateZ(Math.sin(t * 0.13) * 0.06);
+  translate(0, Math.sin(t * 0.4) * 0.015, 0);
+
+  drawWhale();
+  pop();
+
+  drawBubbles(dt);
+}
+
+/* ------------------------------------------------------------ */
+function drawWhale(){
+  const xT = -0.5 * LEN;
+  const g  = undD(1);
+  const al = Math.atan(g);
+  const ca = Math.cos(al), sa = Math.sin(al);
+  const yT = und(1);
+
+  for (let i = 0; i < groups.length; i++){
+    const grp = groups[i];
+    stroke(grp.r, grp.g, grp.b, 215);
+    beginShape(POINTS);
+    const pts = grp.pts;
+    for (let j = 0; j < pts.length; j++){
+      const p = pts[j];
+      if (p.k === 0){
+        vertex(p.x, p.y + und(p.u), p.z);
+      } else {
+        vertex(
+          xT - p.x * ca + p.y * sa,
+          yT + p.x * sa + p.y * ca,
+          p.z
+        );
+      }
+    }
+    endShape();
+  }
+}
+
+/* ------------------------------------------------------------ */
+function initPlankton(){
+  plankton = [];
+  for (let i = 0; i < 420; i++){
+    plankton.push({
+      x:  random(-1800, 1800),
+      y:  random(-1100, 1100),
+      z:  random(-1400, -150),
+      ph: random(TWO_PI),
+      sp: random(0.3, 1.2)
+    });
+  }
+}
+
+function drawPlankton(){
+  push();
+  strokeWeight(1.3);
+  stroke(110, 180, 220, 55);
+  beginShape(POINTS);
+  for (let i = 0; i < plankton.length; i++){
+    const p = plankton[i];
+    p.y -= p.sp;
+    p.x += Math.sin(t * 0.3 + p.ph) * 0.25;
+    if (p.y < -1100) p.y = 1100;
+    vertex(p.x, p.y, p.z);
+  }
+  endShape();
+  pop();
+}
+
+/* ------------------------------------------------------------ */
+function spawnBubbles(n){
+  const S = Math.min(width * 0.68, height * 1.4);
+  for (let i = 0; i < n; i++){
+    bubbles.push({
+      x: random(-0.35, 0.30) * S,
+      y: random(-0.12, 0.18) * S,
+      z: random(-0.25, 0.25) * S,
+      vx: random(-0.4, 0.4),
+      vy: random(40, 130),
+      life: 1
+    });
+  }
+}
+
+function drawBubbles(dt){
+  push();
+  strokeWeight(1.6);
+  noFill();
+
+  const bands = [
+    { lo: 0.66, hi: 1.01, a: 190 },
+    { lo: 0.33, hi: 0.66, a: 110 },
+    { lo: 0.00, hi: 0.33, a: 45  }
+  ];
+
+  for (let b = 0; b < bands.length; b++){
+    stroke(150, 220, 255, bands[b].a);
+    beginShape(POINTS);
+    for (let i = bubbles.length - 1; i >= 0; i--){
+      const p = bubbles[i];
+      p.x += p.vx * dt * 60;
+      p.y -= p.vy * dt;
+      p.life -= dt * 0.28;
+      if (p.life <= 0){ bubbles.splice(i, 1); continue; }
+      if (p.life >= bands[b].lo && p.life < bands[b].hi){
+        vertex(p.x, p.y, p.z);
+      }
+    }
+    endShape();
+  }
+  pop();
+}
+
+/* ============================================================
+   INTERACCIÓN
+   ============================================================ */
+function mousePressed(){
+  energy = 1;
+  spawnBubbles(90);
+}
+function touchStarted(){
+  energy = 1;
+  spawnBubbles(90);
+  return false;
+}
+</script>
+</body>
+</html>

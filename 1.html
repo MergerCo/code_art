@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <style>body{margin:0;overflow:hidden;background:#0a0a0a}</style>
+</head>
+<body>
+<script>
+let particles = [];
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  background(10);
+  for (let i = 0; i < 1000; i++) {
+    particles.push(createVector(random(width), random(height)));
+  }
+}
+
+function draw() {
+  stroke(255, 15);
+  for (let p of particles) {
+    // noise() da movimiento orgánico; random() daría caos puro
+    let angle = noise(p.x * 0.003, p.y * 0.003) * TWO_PI * 4;
+    let step = p5.Vector.fromAngle(angle).mult(2);
+    line(p.x, p.y, p.x + step.x, p.y + step.y);
+    p.add(step);
+    if (p.x < 0 || p.x > width || p.y < 0 || p.y > height) {
+      p.x = random(width);
+      p.y = random(height);
+    }
+  }
+}
+
+function windowResized() { resizeCanvas(windowWidth, windowHeight); }
+</script>
+</body>
+</html>

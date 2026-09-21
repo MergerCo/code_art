@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Tierra · Flow Field</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#02040a;}
+  canvas{display:block;position:fixed;inset:0;touch-action:none;cursor:crosshair;
+         opacity:0;transition:opacity 1.2s ease;}
+  canvas.ready{opacity:1;}
+
+  #hud{
+    position:fixed;left:0;right:0;bottom:22px;text-align:center;
+    color:#7fb0dd;font:10px/1.9 ui-monospace,SFMono-Regular,Menlo,monospace;
+    letter-spacing:.3em;text-transform:uppercase;opacity:.42;
+    pointer-events:none;user-select:none;z-index:5;
+  }
+  #hud b{color:#bfe0ff;font-weight:400;}
+
+  #intro{
+    position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:#02040a;color:#8ec7ff;z-index:10;
+    font:10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+    letter-spacing:.34em;text-transform:uppercase;
+    transition:opacity .8s ease;
+  }
+  #intro span{opacity:.7;}
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="hud">mueve el cursor <b>·</b> soplar &nbsp;·&nbsp; arrastra <b>·</b> empujar &nbsp;·&nbsp; clic <b>·</b> nueva tierra</div>
+<div id="intro"><span id="itxt">generando tierra</span></div>
+
+<script>
+(function () {
+'use strict';
+
+const TAU = Math.PI * 2;
+
+/* ============================================================
+   1. RUIDO DE VALOR 3D + FBM
+   ============================================================ */
+
+const perm = new Uint8Array(512);
+
+function seedNoise(seed) {
+  const p = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) p[i] = i;
+  let s = seed >>> 0;
+  const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  for (let i = 255; i > 0; i--) {
+    const j = (rnd() * (i + 1)) | 0;
+    const t = p[i]; p[i] = p[j]; p[j] = t;
+  }
+  for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+}
+
+function noise3(x, y, z) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const xf = x - xi, yf = y - yi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf);
+  const v = yf * yf * (3 - 2 * yf);
+  const w = zf * zf * (3 - 2 * zf);
+  const X = xi & 255, Y = yi & 255, Z = zi & 255;
+  const A = perm[X] + Y, B = perm[X + 1] + Y;
+  const AA = perm[A & 255] + Z, AB = perm[(A + 1) & 255] + Z;
+  const BA = perm[B & 255] + Z, BB = perm[(B + 1) & 255] + Z;
+  const c000 = perm[AA & 255], c001 = perm[(AA + 1) & 255];
+  const c010 = perm[AB & 255], c011 = perm[(AB + 1) & 255];
+  const c100 = perm[BA & 255], c101 = perm[(BA + 1) & 255];
+  const c110 = perm[BB & 255], c111 = perm[(BB + 1) & 255];
+  const x00 = c000 + (c100 - c000) * u;
+  const x10 = c010 + (c110 - c010) * u;
+  const x01 = c001 + (c101 - c001) * u;
+  const x11 = c011 + (c111 - c011) * u;
+  const y0 = x00 + (x10 - x00) * v;
+  const y1 = x01 + (x11 - x01) * v;
+  return (y0 + (y1 - y0) * w) / 255;
+}
+
+function fbm3(x, y, z, oct) {
+  let amp = 0.5, f = 1, s = 0, n = 0;
+  for (let i = 0; i < oct; i++) {
+    s += amp * noise3(x * f, y * f, z * f);
+    n += amp; amp *= 0.5; f *= 2;
+  }
+  return s / n;
+}
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ============================================================
+   2. PALETA DE COLORES TERRESTRES
+   ============================================================ */
+
+const PAL = [
+  /* 0  océano profundo   */ [  8,  18,  52],
+  /* 1  océano profundo   */ [ 12,  30,  80],
+  /* 2  océano            */ [ 16,  48, 118],
+  /* 3  océano            */ [ 22,  70, 158],
+  /* 4  océano medio      */ [ 34, 100, 194],
+  /* 5  océano medio      */ [ 55, 135, 216],
+  /* 6  océano somero     */ [ 92, 172, 230],
+  /* 7  costa / arrecife  */ [140, 200, 238],
+  /* 8  playa             */ [200, 190, 148],
+  /* 9  dunas             */ [222, 208, 168],
+  /* 10 pradera clara     */ [168, 190, 118],
+  /* 11 pradera           */ [140, 170,  96],
+  /* 12 pradera           */ [108, 148,  82],
+  /* 13 bosque            */ [ 82, 122,  68],
+  /* 14 bosque            */ [ 58,  96,  58],
+  /* 15 bosque oscuro     */ [ 42,  78,  50],
+  /* 16 bosque húmedo     */ [ 34,  64,  44],
+  /* 17 roca              */ [ 92,  86,  72],
+  /* 18 roca              */ [118, 108,  92],
+  /* 19 roca              */ [148, 138, 122],
+  /* 20 roca clara        */ [178, 168, 152],
+  /* 21 hielo             */ [206, 210, 214],
+  /* 22 nieve             */ [232, 236, 240],
+  /* 23 nieve             */ [248, 250, 255],
+  /* 24 desierto          */ [196, 168, 118],
+  /* 25 desierto          */ [216, 190, 140],
+  /* 26 desierto          */ [176, 148, 104]
+];
+
+const PAL_STR = PAL.map(function (c) {
+  return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')';
+});
+
+/* ============================================================
+   3. TEXTURA PROCEDURAL DE LA TIERRA
+   ============================================================ */
+
+const TW = 512, TH = 256;
+const palIdx  = new Uint8Array(TW * TH);
+const elevMap = new Float32Array(TW * TH);
+
+function buildEarth(seed) {
+  seedNoise(seed);
+  const rnd = mulberry32(seed ^ 0xABCD1234);
+
+  const o1 = rnd() * 100, o2 = rnd() * 100, o3 = rnd() * 100;
+  const o4 = rnd() * 100, o5 = rnd() * 100, o6 = rnd() * 100;
+  const o7 = rnd() * 100, o8 = rnd() * 100, o9 = rnd() * 100;
+
+  for (let j = 0; j < TH; j++) {
+    const lat = Math.PI * 0.5 - (j + 0.5) / TH * Math.PI;
+    const cl = Math.cos(lat), sl = Math.sin(lat);
+    const absLat = Math.abs(lat);
+    const row = j * TW;
+
+    for (let i = 0; i < TW; i++) {
+      const lon = ((i + 0.5) / TW) * TAU - Math.PI;
+      const sx = cl * Math.cos(lon);
+      const sy = sl;
+      const sz = cl * Math.sin(lon);
+
+      /* relieve: 3D noise sobre la esfera -> continentes sin costuras */
+      let e = fbm3(sx * 2.2 + o1, sy * 2.2 + o2, sz * 2.2 + o3, 5);
+      const cont = fbm3(sx * 0.9 + o4, sy * 0.9 + o5, sz * 0.9 + o6, 3);
+      e = e * 0.62 + cont * 0.38;
+
+      const biome = fbm3(sx * 1.4 + o7, sy * 1.4 + o8, sz * 1.4 + o9, 3);
+
+      const idx = row + i;
+      elevMap[idx] = e;
+
+      let r, g, b;
+
+      if (e <= 0.5) {
+        /* --- océano --- */
+        let d = (0.5 - e) / 0.28;
+        if (d > 1) d = 1;
+        const sh = 1 - d;
+        r =   8 + 84 * sh;
+        g =  18 + 154 * sh;
+        b =  52 + 178 * sh;
+      } else {
+        /* --- tierra --- */
+        let t = (e - 0.5) / 0.26;
+        if (t > 1) t = 1;
+
+        if (t < 0.05) {
+          r = 200; g = 190; b = 148;                    // playa
+        } else if (t < 0.30) {
+          const k = (t - 0.05) / 0.25;
+          if (biome > 0.58) {                           // desierto
+            r = 196 - 20 * k; g = 168 + 22 * k; b = 118 + 22 * k;
+          } else {                                      // pradera
+            r = 168 - 60 * k; g = 190 - 42 * k; b = 118 - 36 * k;
+          }
+        } else if (t < 0.55) {
+          const k = (t - 0.30) / 0.25;
+          r = 108 - 50 * k; g = 148 - 52 * k; b = 82 - 24 * k;   // bosque
+        } else if (t < 0.80) {
+          const k = (t - 0.55) / 0.25;
+          r = 58 + 60 * k; g = 96 + 22 * k; b = 58 + 34 * k;     // roca
+        } else if (t < 0.92) {
+          const k = (t - 0.80) / 0.12;
+          r = 118 + 60 * k; g = 118 + 50 * k; b = 92 + 60 * k;   // roca alta
+        } else {
+          const k = (t - 0.92) / 0.08;
+          r = 178 + 62 * k; g = 168 + 74 * k; b = 152 + 92 * k;  // nieve
+        }
+      }
+
+      /* --- casquetes polares --- */
+      const iceEdge = 1.18 + (e - 0.5) * 0.5;
+      if (absLat > iceEdge) {
+        let k = (absLat - iceEdge) / 0.18;
+        if (k > 1) k = 1;
+        k = k * k * (3 - 2 * k);
+        r += (240 - r) * k;
+        g += (245 - g) * k;
+        b += (255 - b) * k;
+      }
+
+      /* --- color más cercano en la paleta --- */
+      let bestD = 1e9, best = 0;
+      for (let p = 0; p < PAL.length; p++) {
+        const dr = r - PAL[p][0], dg = g - PAL[p][1], db = b - PAL[p][2];
+        const dd = dr * dr + dg * dg + db * db;
+        if (dd < bestD) { bestD = dd; best = p; }
+      }
+      palIdx[idx] = best;
+    }
+  }
+}
+
+/* ============================================================
+   4. SISTEMA DE PARTÍCULAS
+   ============================================================ */
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+const introEl = document.getElementById('intro');
+const introTxt = document.getElementById('itxt');
+
+let W = 0, H = 0, DPR = 1;
+
+let N = 0;
+let px, py, vx, vy, life, maxLife;
+
+const FADE = 0.028;                 // velocidad de desvanecimiento de estelas
+
+/* fuerza del ratón */
+let mouseX = -9999, mouseY = -9999, pmX = -9999, pmY = -9999;
+let mouseVX = 0, mouseVY = 0;
+
+function initParticles() {
+  const area = window.innerWidth * window.innerHeight;
+  N = Math.round(Math.min(6500, Math.max(1400, area / 320)));
+
+  px      = new Float32Array(N);
+  py      = new Float32Array(N);
+  vx      = new Float32Array(N);
+  vy      = new Float32Array(N);
+  life    = new Float32Array(N);
+  maxLife = new Float32Array(N);
+
+  for (let i = 0; i < N; i++) respawn(i, true);
+}
+
+function respawn(i, initial) {
+  px[i] = Math.random() * W;
+  py[i] = Math.random() * H;
+  vx[i] = 0;
+  vy[i] = 0;
+  maxLife[i] = 90 + Math.random() * 240;
+  life[i] = initial ? Math.random() * maxLife[i] : maxLife[i];
+}
+
+/* ============================================================
+   5. CAMPO DE FLUJO
+   ============================================================ */
+
+const FIELD_SCALE = 0.0017;   // frecuencia espacial del campo
+const TIME_SCALE  = 0.09;     // velocidad de evolución del campo
+
+function flowAngle(x, y, t) {
+  const nx = x * FIELD_SCALE;
+  const ny = y * FIELD_SCALE;
+
+  const n1 = noise3(nx, ny, t);
+  const n2 = noise3(nx * 2.6 + 40, ny * 2.6 + 40, t * 1.7);
+  const n3 = noise3(nx * 0.45 - 20, ny * 0.45 - 20, t * 0.55);
+
+  const v = n1 * 0.55 + n2 * 0.22 + n3 * 0.23;
+  return v * TAU * 1.85;
+}
+
+/* ============================================================
+   6. BUCLE PRINCIPAL
+   ============================================================ */
+
+let lastT = 0;
+let running = false;
+let time0 = 0;
+
+function frame(now) {
+  if (!running) return;
+
+  const t = now / 1000;
+  if (!time0) time0 = t;
+  let dt = lastT ? t - lastT : 0.016;
+  lastT = t;
+  if (dt > 0.05) dt = 0.05;
+
+  /* --- desvanecer el lienzo --- */
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = 'rgba(2, 4, 10, ' + FADE + ')';
+  ctx.fillRect(0, 0, W, H);
+
+  /* --- composición aditiva para las partículas --- */
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  const tFlow = t * TIME_SCALE;
+  const invW = 1 / W, invH = 1 / H;
+
+  /* decaimiento de la velocidad del ratón */
+  mouseVX *= 0.86;
+  mouseVY *= 0.86;
+
+  const MR = 150;
+  const MR2 = MR * MR;
+
+  for (let i = 0; i < N; i++) {
+    const x = px[i];
+    const y = py[i];
+
+    /* ---------- muestrear el campo de flujo ---------- */
+    const ang = flowAngle(x, y, tFlow);
+
+    /* ---------- elevación -> modula la dinámica ---------- */
+    let uu = x * invW; if (uu < 0) uu = 0; else if (uu >= 1) uu = 0.9999;
+    let vv = y * invH; if (vv < 0) vv = 0; else if (vv >= 1) vv = 0.9999;
+    const ti = ((vv * TH) | 0) * TW + ((uu * TW) | 0);
+    const elev = elevMap[ti];
+    const isOcean = elev < 0.5;
+
+    /* océanos: corrientes rápidas y suaves · tierra: flujo lento y denso */
+    const spd   = isOcean ? 1.75 : 0.62;
+    const damp  = isOcean ? 0.925 : 0.870;
+    const force = isOcean ? 0.32 : 0.24;
+
+    vx[i] = vx[i] * damp + Math.cos(ang) * force * spd;
+    vy[i] = vy[i] * damp + Math.sin(ang) * force * spd;
+
+    /* ---------- empuje del ratón ---------- */
+    const mdx = x - mouseX, mdy = y - mouseY;
+    const md2 = mdx * mdx + mdy * mdy;
+    if (md2 < MR2) {
+      const f = 1 - Math.sqrt(md2) / MR;
+      const ff = f * f * 1.6;
+      vx[i] += mouseVX * ff;
+      vy[i] += mouseVY * ff;
+      /* vórtice suave alrededor del cursor */
+      const invD = 1 / (Math.sqrt(md2) + 1.0);
+      vx[i] += -mdy * invD * 0.35 * f;
+      vy[i] +=  mdx * invD * 0.35 * f;
+    }
+
+    /* ---------- limitar velocidad ---------- */
+    const s2 = vx[i] * vx[i] + vy[i] * vy[i];
+    const MAXS = 5.2;
+    if (s2 > MAXS * MAXS) {
+      const sc = MAXS / Math.sqrt(s2);
+      vx[i] *= sc; vy[i] *= sc;
+    }
+
+    const nx2 = x + vx[i];
+    const ny2 = y + vy[i];
+
+    /* ---------- color muestreado de la Tierra ---------- */
+    let cu = nx2 * invW; if (cu < 0) cu = 0; else if (cu >= 1) cu = 0.9999;
+    let cv = ny2 * invH; if (cv < 0) cv = 0; else if (cv >= 1) cv = 0.9999;
+    const ci = ((cv * TH) | 0) * TW + ((cu * TW) | 0);
+
+    ctx.strokeStyle = PAL_STR[palIdx[ci]];
+    ctx.globalAlpha = isOcean ? 0.34 : 0.42;
+    ctx.lineWidth   = isOcean ? 0.85 : 1.05;
+
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(nx2, ny2);
+    ctx.stroke();
+
+    px[i] = nx2;
+    py[i] = ny2;
+
+    /* ---------- reciclar ---------- */
+    life[i] -= 1;
+    if (life[i] <= 0 ||
+        nx2 < -40 || nx2 > W + 40 ||
+        ny2 < -40 || ny2 > H + 40) {
+      respawn(i, false);
+    }
+  }
+
+  requestAnimationFrame(frame);
+}
+
+/* ============================================================
+   7. RESIZE
+   ============================================================ */
+
+let resizeTimer = null;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 1.5);
+  W = window.innerWidth;
+  H = window.innerHeight;
+
+  canvas.width  = Math.floor(W * DPR);
+  canvas.height = Math.floor(H * DPR);
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+  /* limpiar */
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#02040a';
+  ctx.fillRect(0, 0, W, H);
+}
+
+function onResize() {
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(function () {
+    const oldW = W, oldH = H;
+    resize();
+    /* reescalar partículas existentes */
+    if (px && oldW && oldH) {
+      const sx = W / oldW, sy = H / oldH;
+      for (let i = 0; i < N; i++) { px[i] *= sx; py[i] *= sy; }
+    }
+  }, 140);
+}
+
+window.addEventListener('resize', onResize);
+window.addEventListener('orientationchange', onResize);
+
+/* ============================================================
+   8. INTERACCIÓN
+   ============================================================ */
+
+let dragging = false;
+let lastX = 0, lastY = 0, downX = 0, downY = 0, downT = 0, moved = false;
+
+canvas.addEventListener('pointerdown', function (e) {
+  dragging = true;
+  moved = false;
+  downT = performance.now();
+  downX = lastX = e.clientX;
+  downY = lastY = e.clientY;
+  mouseX = pmX = e.clientX;
+  mouseY = pmY = e.clientY;
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+});
+
+canvas.addEventListener('pointermove', function (e) {
+  const x = e.clientX, y = e.clientY;
+
+  if (dragging) {
+    const dx = x - lastX, dy = y - lastY;
+    mouseVX += dx * 0.55;
+    mouseVY += dy * 0.55;
+    lastX = x; lastY = y;
+    if (Math.abs(x - downX) > 5 || Math.abs(y - downY) > 5) moved = true;
+  } else {
+    /* sólo pasar el cursor ya "sopla" suavemente */
+    mouseVX += (x - pmX) * 0.30;
+    mouseVY += (y - pmY) * 0.30;
+  }
+
+  pmX = mouseX; pmY = mouseY;
+  mouseX = x;   mouseY = y;
+});
+
+function endDrag(e) {
+  if (!dragging) return;
+  dragging = false;
+  if (!moved && performance.now() - downT < 380) regenerate();
+}
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', function () { dragging = false; });
+canvas.addEventListener('pointerleave', function () {
+  mouseX = -9999; mouseY = -9999;
+});
+
+/* ============================================================
+   9. ARRANQUE / REGENERACIÓN
+   ============================================================ */
+
+let seed = (Math.random() * 1e9) | 0;
+let regenerating = false;
+
+function regenerate() {
+  if (regenerating) return;
+  regenerating = true;
+
+  introTxt.textContent = 'nueva tierra';
+  introEl.style.opacity = '1';
+  introEl.style.display = 'flex';
+
+  setTimeout(function () {
+    seed = (Math.random() * 1e9) | 0;
+    buildEarth(seed);
+
+    /* reiniciar todas las partículas con un "estallido" inicial */
+    for (let i = 0; i < N; i++) {
+      respawn(i, true);
+      px[i] = W * 0.5 + (Math.random() - 0.5) * W * 0.15;
+      py[i] = H * 0.5 + (Math.random() - 0.5) * H * 0.15;
+    }
+
+    /* limpiar el lienzo */
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#02040a';
+    ctx.fillRect(0, 0, W, H);
+
+    setTimeout(function () {
+      introEl.style.opacity = '0';
+      setTimeout(function () { introEl.style.display = 'none'; }, 900);
+      regenerating = false;
+    }, 350);
+  }, 120);
+}
+
+function init() {
+  resize();
+  initParticles();
+
+  /* construir la primera Tierra (asíncrono para no bloquear) */
+  setTimeout(function () {
+    seed = (Math.random() * 1e9) | 0;
+    buildEarth(seed);
+
+    canvas.classList.add('ready');
+
+    introEl.style.opacity = '0';
+    setTimeout(function () { introEl.style.display = 'none'; }, 900);
+
+    running = true;
+    lastT = 0;
+    time0 = 0;
+    requestAnimationFrame(frame);
+  }, 60);
+}
+
+init();
+
+})();
+</script>
+</body>
+</html>
