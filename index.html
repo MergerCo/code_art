@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mi Portafolio Generativo</title>
+  <style>
+    /* ===== Reset y base ===== */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #e0e0e0;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      line-height: 1.6;
+      padding: 2rem;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    /* ===== Bio (inspirada en codergb.art) ===== */
+    .bio {
+      margin-bottom: 4rem;
+      padding-bottom: 2rem;
+      border-bottom: 1px solid #222;
+    }
+    .bio h1 {
+      font-size: 2rem;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+      margin-bottom: 0.5rem;
+    }
+    .bio .handle {
+      color: #888;
+      font-size: 1.1rem;
+      margin-bottom: 1.5rem;
+    }
+    .bio p {
+      max-width: 600px;
+      color: #aaa;
+      font-size: 1.05rem;
+    }
+    .bio a {
+      color: #6ee7b7;
+      text-decoration: none;
+      border-bottom: 1px solid transparent;
+      transition: border-color 0.2s;
+    }
+    .bio a:hover {
+      border-bottom-color: #6ee7b7;
+    }
+
+    /* ===== Galería ===== */
+    .galeria-titulo {
+      font-size: 1.4rem;
+      font-weight: 500;
+      margin-bottom: 1.5rem;
+      color: #fff;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 1.5rem;
+    }
+    .card {
+      background: #111;
+      border: 1px solid #1e1e1e;
+      border-radius: 12px;
+      overflow: hidden;
+      transition: border-color 0.3s, transform 0.2s;
+    }
+    .card:hover {
+      border-color: #333;
+      transform: translateY(-2px);
+    }
+    .card iframe {
+      width: 100%;
+      aspect-ratio: 1 / 1; /* cuadrado, como muchas obras generativas */
+      border: none;
+      display: block;
+      background: #000;
+    }
+    .card-info {
+      padding: 1rem 1.2rem;
+    }
+    .card-info h3 {
+      font-size: 1rem;
+      font-weight: 500;
+      margin-bottom: 0.3rem;
+      color: #fff;
+    }
+    .card-info p {
+      font-size: 0.85rem;
+      color: #777;
+    }
+
+    /* ===== Footer ===== */
+    footer {
+      margin-top: 5rem;
+      padding-top: 2rem;
+      border-top: 1px solid #222;
+      font-size: 0.9rem;
+      color: #555;
+      text-align: center;
+    }
+    footer a {
+      color: #6ee7b7;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ===== BIO ===== -->
+  <section class="bio">
+    <h1>Tu Nombre</h1>
+    <div class="handle">@tu_usuario</div>
+    <p>
+      Hi, I’m passionate about exploring the world of data, programming, and development. 
+      I want to share some generative art projects. You can see more on my <a href="https://instagram.com/tu_usuario" target="_blank">Instagram</a>.
+      Contact: <a href="mailto:tu@email.com">info.mergerconsulting@gmail.com.com</a>
+    </p>
+  </section>
+
+  <!-- ===== GALERÍA ===== -->
+  <h2 class="galeria-titulo">Obras</h2>
+  <div class="grid" id="galeria"></div>
+
+  <!-- ===== FOOTER ===== -->
+  <footer>
+    <p>© 2026 Merger Data · Todos los derechos reservados</p>
+  </footer>
+
+  <!-- Datos de las obras -->
+  <script src="artworks.js"></script>
+
+  <!-- Render dinámico de la galería -->
+  <script>
+    const galeria = document.getElementById('galeria');
+
+    artworks.forEach(obra => {
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      // iframe que carga el sketch
+      const iframe = document.createElement('iframe');
+      iframe.src = `sketches/${obra.archivo}`;
+      iframe.loading = 'lazy';
+      iframe.title = obra.titulo;
+      // Opcional: permitir interacción con el sketch
+      iframe.setAttribute('scrolling', 'no');
+
+      const info = document.createElement('div');
+      info.className = 'card-info';
+      info.innerHTML = `
+        <h3>${obra.titulo}</h3>
+        <p>${obra.descripcion || ''}</p>
+      `;
+
+      card.appendChild(iframe);
+      card.appendChild(info);
+      galeria.appendChild(card);
+    });
+  </script>
+
+</body>
+</html>
