@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Cubo Generativo · @Captura_Casual</title>
+<style>
+  :root { --ink: #e8ecf5; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: #04050a; overflow: hidden; }
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--ink);
+    -webkit-tap-highlight-color: transparent;
+  }
+  #scene { display: block; width: 100%; height: 100%; }
+
+  /* Viñeta + líneas de escaneo sutiles */
+  .overlay {
+    position: fixed; inset: 0; pointer-events: none; z-index: 5;
+    background:
+      radial-gradient(120% 90% at 50% 45%, rgba(0,0,0,0) 38%, rgba(0,0,0,.62) 100%),
+      repeating-linear-gradient(0deg, rgba(255,255,255,.022) 0 1px, transparent 1px 3px);
+  }
+
+  /* Marca de agua — texto plano */
+  .watermark {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      color: rgba(255,255,255,0.38);
+      font-size: 14px;
+      pointer-events: none;
+      user-select: none;
+  }
+  
+</style>
+</head>
+<body>
+
+<canvas id="scene"></canvas>
+<div class="overlay"></div>
+
+<div class="watermark">@Captura_Casual | 2026</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ============================================================
+   0. UTILIDADES
+   ============================================================ */
+const clamp01        = v => v < 0 ? 0 : v > 1 ? 1 : v;
+const easeOutCubic   = t => 1 - Math.pow(1 - t, 3);
+const easeInOutCubic = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const easeInCubic    = t => t * t * t;
+
+const IDENTITY = new THREE.Quaternion();
+
+/* ============================================================
+   1. CONFIGURACIÓN
+   ============================================================ */
+const SPACING     = 1.03;
+const CUBIE_SIZE  = 0.97;
+
+const DUR = {
+  birth:    3.2,
+  align:    2.8,
+  settle:   3.6,
+  dissolve: 1.8
+};
+const MAX_BIRTH_DELAY = 0.90;
+const MAX_ALIGN_DELAY = 0.90;
+const MAX_DIS_DELAY   = 0.50;
+
+/* ============================================================
+   2. RENDERER / ESCENA / CÁMARA
+   ============================================================ */
+const canvas = document.getElementById('scene');
+
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: true,
+  powerPreference: 'high-performance'
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.12;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x04050a);
+scene.fog = new THREE.FogExp2(0x04050a, 0.020);
+
+const camera = new THREE.PerspectiveCamera(
+  42, window.innerWidth / window.innerHeight, 0.1, 400
+);
+camera.position.set(7.6, 6.4, 8.8);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping   = true;
+controls.dampingFactor   = 0.06;
+controls.enablePan       = false;
+controls.minDistance     = 6.5;
+controls.maxDistance     = 24;
+controls.minPolarAngle   = 0.25;
+controls.maxPolarAngle   = Math.PI - 0.25;
+controls.autoRotate      = true;
+controls.autoRotateSpeed = 0.55;
+controls.target.set(0, 0, 0);
+
+/* ============================================================
+   3. LUCES
+   ============================================================ */
+scene.add(new THREE.HemisphereLight(0x93a8ff, 0x06060c, 1.0));
+
+const keyLight = new THREE.DirectionalLight(0xffffff, 2.4);
+keyLight.position.set(7, 11, 9);
+scene.add(keyLight);
+
+const fillLight = new THREE.DirectionalLight(0x4a7dff, 1.3);
+fillLight.position.set(-9, -5, -7);
+scene.add(fillLight);
+
+const rimLight = new THREE.DirectionalLight(0xff5fa2, 0.9);
+rimLight.position.set(-6, 6, -9);
+scene.add(rimLight);
+
+const glowA = new THREE.PointLight(0xff2d95, 160, 40, 2);
+glowA.position.set(-7, 5, 7);
+scene.add(glowA);
+
+const glowB = new THREE.PointLight(0x00e5ff, 160, 40, 2);
+glowB.position.set(7, -6, -7);
+scene.add(glowB);
+
+/* ============================================================
+   4. MATERIALES DE CARA
+   ============================================================ */
+function faceMaterial(hex) {
+  return new THREE.MeshPhysicalMaterial({
+    color: hex,
+    roughness: 0.32,
+    metalness: 0.08,
+    clearcoat: 0.9,
+    clearcoatRoughness: 0.16,
+    emissive: new THREE.Color(hex),
+    emissiveIntensity: 0
+  });
+}
+
+const matInner = new THREE.MeshPhysicalMaterial({
+  color: 0x0a0a12,
+  roughness: 0.85,
+  metalness: 0.25
+});
+
+/* Paleta solicitada (5 colores) */
+const BASE = {
+  R: faceMaterial(0xff0000), // #ff0000
+  L: faceMaterial(0xff6400), // #ff6400
+  U: faceMaterial(0xffff00), // #ffff00
+  D: faceMaterial(0x00bb00), // #00bb00
+  F: faceMaterial(0x0000bb), // #0000bb
+  B: faceMaterial(0xff0000)  // #ff0000 (repetido para la 6ª cara)
+};
+
+/* ============================================================
+   5. CONSTRUCCIÓN DEL CUBO (27 cubies)
+   ============================================================ */
+const cubeGroup = new THREE.Group();
+scene.add(cubeGroup);
+
+const cubieGeo = new THREE.BoxGeometry(CUBIE_SIZE, CUBIE_SIZE, CUBIE_SIZE);
+const cubies = [];
+
+for (let gx = 0; gx < 3; gx++) {
+  for (let gy = 0; gy < 3; gy++) {
+    for (let gz = 0; gz < 3; gz++) {
+
+      const x = gx - 1, y = gy - 1, z = gz - 1;
+
+      const defs = [
+        { on: x ===  1, base: BASE.R },
+        { on: x === -1, base: BASE.L },
+        { on: y ===  1, base: BASE.U },
+        { on: y === -1, base: BASE.D },
+        { on: z ===  1, base: BASE.F },
+        { on: z === -1, base: BASE.B }
+      ];
+
+      const mats     = defs.map(d => d.on ? d.base.clone() : matInner);
+      const glowIdx  = defs.map((d, i) => d.on ? i : -1).filter(i => i >= 0);
+
+      const mesh = new THREE.Mesh(cubieGeo, mats);
+
+      const home = new THREE.Vector3(x * SPACING, y * SPACING, z * SPACING);
+      mesh.position.copy(home);
+
+      const homeDir = home.clone().normalize();
+
+      mesh.userData = {
+        home,
+        homeDir,
+        wavePhase: home.length() * 1.7,
+        gx, gy, gz,
+        mats,
+        glowIdx,
+        startPos:      new THREE.Vector3(),
+        outDir:        new THREE.Vector3(),
+        qStart:        new THREE.Quaternion(),
+        qMid:          new THREE.Quaternion(),
+        qEnd:          new THREE.Quaternion(),
+        birthDelay:    0,
+        alignDelay:    0,
+        dissolveDelay: 0
+      };
+
+      cubies.push(mesh);
+      cubeGroup.add(mesh);
+    }
+  }
+}
+
+/* ============================================================
+   6. CAMPO DE PARTÍCULAS
+   ============================================================ */
+const PCOUNT = 1500;
+const pPositions = new Float32Array(PCOUNT * 3);
+
+for (let i = 0; i < PCOUNT; i++) {
+  const v = new THREE.Vector3().randomDirection()
+    .multiplyScalar(9 + Math.random() * 24);
+  pPositions[i * 3    ] = v.x;
+  pPositions[i * 3 + 1] = v.y;
+  pPositions[i * 3 + 2] = v.z;
+}
+
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPositions, 3));
+
+const pMat = new THREE.PointsMaterial({
+  size: 0.085,
+  color: 0x9fd4ff,
+  transparent: true,
+  opacity: 0,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  sizeAttenuation: true
+});
+
+const particles = new THREE.Points(pGeo, pMat);
+scene.add(particles);
+
+/* ============================================================
+   7. LÓGICA DE LA SECUENCIA
+   ============================================================ */
+let phase = 'birth';
+let pt    = 0;
+let flash = 0;
+let elapsed = 0;
+
+function setGlow(cubie, value) {
+  const { mats, glowIdx } = cubie.userData;
+  for (let i = 0; i < glowIdx.length; i++) {
+    mats[glowIdx[i]].emissiveIntensity = value;
+  }
+}
+
+function resetAll() {
+  for (const c of cubies) {
+    const u = c.userData;
+
+    u.startPos.randomDirection().multiplyScalar(14 + Math.random() * 18);
+    u.outDir.randomDirection();
+
+    u.qStart.random();
+    u.qMid.random();
+    u.qEnd.random();
+
+    u.birthDelay    = Math.random() * MAX_BIRTH_DELAY;
+    u.alignDelay    = ((u.gx + u.gy + u.gz) / 6) * MAX_ALIGN_DELAY
+                      + Math.random() * 0.18;
+    u.dissolveDelay = Math.random() * MAX_DIS_DELAY;
+
+    c.position.copy(u.startPos);
+    c.quaternion.copy(u.qStart);
+    c.scale.setScalar(0);
+    setGlow(c, 0);
+  }
+
+  phase = 'birth';
+  pt    = 0;
+  flash = 0;
+
+  pMat.opacity = 0.95;
+  particles.scale.setScalar(1);
+}
+
+/* ============================================================
+   8. BUCLE DE ANIMACIÓN
+   ============================================================ */
+const clock = new THREE.Clock();
+
+function updateSequence(dt) {
+  elapsed += dt;
+  pt      += dt;
+
+  /* ---------- FASE 1 · EMERGENCIA ---------- */
+  if (phase === 'birth') {
+
+    const p = clamp01(pt / DUR.birth);
+    const localDur = DUR.birth - MAX_BIRTH_DELAY;
+
+    for (const c of cubies) {
+      const u  = c.userData;
+      const lp = clamp01((pt - u.birthDelay) / localDur);
+      const e  = easeOutCubic(lp);
+
+      c.position.lerpVectors(u.startPos, u.home, e);
+      c.quaternion.slerpQuaternions(u.qStart, u.qMid, e);
+      c.scale.setScalar(e * (1 + 0.25 * Math.sin(Math.PI * lp)));
+      setGlow(c, 0.35 * Math.sin(Math.PI * lp));
+    }
+
+    pMat.opacity = 0.95 * (1 - p);
+    particles.scale.setScalar(1 - 0.62 * p);
+    particles.rotation.y += dt * 0.28;
+    particles.rotation.x += dt * 0.10;
+
+    if (pt >= DUR.birth) { phase = 'align'; pt = 0; }
+    return;
+  }
+
+  /* ---------- FASE 2 · ALINEACIÓN ---------- */
+  if (phase === 'align') {
+
+    const localDur = DUR.align - (MAX_ALIGN_DELAY + 0.18);
+
+    for (const c of cubies) {
+      const u  = c.userData;
+      const lp = clamp01((pt - u.alignDelay) / localDur);
+      const e  = easeInOutCubic(lp);
+
+      c.quaternion.slerpQuaternions(u.qMid, IDENTITY, e);
+
+      c.position.copy(u.home)
+        .addScaledVector(u.homeDir, Math.sin(Math.PI * lp) * 0.16);
+
+      c.scale.setScalar(1 + Math.sin(Math.PI * lp) * 0.12);
+
+      setGlow(c, Math.sin(Math.PI * lp) * 0.95);
+    }
+
+    pMat.opacity = Math.max(0, pMat.opacity - dt * 1.5);
+
+    if (pt >= DUR.align) {
+      phase = 'settle';
+      pt    = 0;
+      flash = 1.0;
+    }
+    return;
+  }
+
+  /* ---------- FASE 3 · CUBO ARMADO ---------- */
+  if (phase === 'settle') {
+
+    flash = Math.max(0, flash - dt * 1.1);
+
+    for (const c of cubies) {
+      const u = c.userData;
+      const w = Math.sin(pt * 2.0 - u.wavePhase);
+
+      c.position.copy(u.home).addScaledVector(u.homeDir, w * 0.045);
+      c.quaternion.copy(IDENTITY);
+      c.scale.setScalar(1 + w * 0.012);
+      setGlow(c, flash * 0.85);
+    }
+
+    pMat.opacity = 0.05 + flash * 0.12;
+    particles.scale.setScalar(0.38);
+    particles.rotation.y += dt * 0.06;
+
+    if (pt >= DUR.settle) { phase = 'dissolve'; pt = 0; }
+    return;
+  }
+
+  /* ---------- FASE 4 · DISOLUCIÓN ---------- */
+  if (phase === 'dissolve') {
+
+    const p = clamp01(pt / DUR.dissolve);
+    const localDur = DUR.dissolve - MAX_DIS_DELAY;
+
+    for (const c of cubies) {
+      const u  = c.userData;
+      const lp = clamp01((pt - u.dissolveDelay) / localDur);
+      const e  = easeInCubic(lp);
+
+      c.position.copy(u.home).addScaledVector(u.outDir, e * 24);
+      c.quaternion.slerpQuaternions(IDENTITY, u.qEnd, e);
+      c.scale.setScalar(Math.max(0.0001, 1 - e));
+      setGlow(c, 0);
+    }
+
+    pMat.opacity = 0.9 * p;
+    particles.scale.setScalar(0.38 + 0.62 * p);
+    particles.rotation.y += dt * 0.2;
+
+    if (pt >= DUR.dissolve) resetAll();
+    return;
+  }
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  updateSequence(dt);
+
+  glowA.intensity = 160 + flash * 220;
+  glowB.intensity = 160 + flash * 220;
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+/* ============================================================
+   9. INTERACCIÓN · CLICK PARA REINICIAR
+   ============================================================ */
+let downX = 0, downY = 0, downT = 0;
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  downX = e.clientX; downY = e.clientY; downT = performance.now();
+});
+
+renderer.domElement.addEventListener('pointerup', (e) => {
+  const moved = Math.hypot(e.clientX - downX, e.clientY - downY);
+  const quick = performance.now() - downT < 450;
+  if (moved < 8 && quick) resetAll();
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.key === 'r' || e.key === 'R') {
+    e.preventDefault();
+    resetAll();
+  }
+});
+
+/* ============================================================
+   10. RESIZE
+   ============================================================ */
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* ============================================================
+   11. ACCIÓN
+   ============================================================ */
+resetAll();
+animate();
+</script>
+</body>
+</html>

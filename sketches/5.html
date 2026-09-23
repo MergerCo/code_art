@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Huella Digital — @Captura_Casual | 2026</title>
+<style>
+  html,body{
+    margin:0;padding:0;height:100%;
+    background:#000;overflow:hidden;
+    cursor:crosshair;
+  }
+  canvas{display:block;}
+
+  /* ---------- pista que se desvanece ---------- */
+  .hint{
+    position:fixed;left:0;right:0;bottom:58px;
+    text-align:center;pointer-events:none;user-select:none;
+    font:9px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    letter-spacing:.36em;text-transform:uppercase;
+    color:rgba(255,255,255,.55);
+    animation: fadeHint 6s ease forwards;
+  }
+  @keyframes fadeHint{
+    0%   { opacity:0; }
+    12%  { opacity:.55; }
+    70%  { opacity:.55; }
+    100% { opacity:0; }
+  }
+
+  /* ---------- marca de agua ---------- */
+  .watermark {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      color: rgba(255,255,255,0.28);
+      font-size: 14px;
+      pointer-events: none;
+      user-select: none;
+  }
+  @media (max-width:520px){
+    .watermark{ font-size:14px; right:12px; bottom:10px; letter-spacing:.12em; }
+  }
+</style>
+</head>
+<body>
+
+<div class="hint">clic para una nueva huella</div>
+<div class="watermark">@Captura_Casual | 2026</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+<script>
+/* ==========================================================================
+   HUELLA DIGITAL GENERATIVA  ·  @Captura_Casual | 2026
+   --------------------------------------------------------------------------
+   Sistema de partículas blancas (dibujadas como pequeños puntos cuadrados,
+   igual que point() + strokeWeight(2) del sketch de referencia) con:
+     · atracción al "hogar"      (attraction     = 0.01)
+     · amortiguación             (damping        = 0.9)
+     · repulsión del cursor      (repel_strength = 28, repel_radius)
+     · oscilación orbital suave  (angle += 0.01)
+   El "hogar" de cada partícula sigue un campo de fase que genera crestas
+   dactilares (anillos deformados + ruido de bifurcación).
+   Clic / tap  →  nueva huella.
+   ========================================================================== */
+
+/* ---------- detección de móvil ---------- */
+let isMobile = /iPhone|iPod|Android/i.test(navigator.userAgent);
+
+/* ---------- parámetros (equivalentes al sketch de referencia) ---------- */
+let repel_radius;                      // radio de repulsión del cursor
+let radius_;                           // radio base de la huella
+let angle = 0;                         // fase de rotación / oscilación
+let points = [];                       // partículas
+
+const particles      = isMobile ? 5000 : 12000;
+const attraction     = 0.01;           // fuerza de retorno al hogar
+const damping        = 0.9;            // fricción
+const repel_strength = 28;             // fuerza de repulsión
+const DURATION       = 8000;           // ms de construcción progresiva
+const DOT_MIN        = 1.6;            // tamaño mínimo del punto (px)
+const DOT_MAX        = 2.6;            // tamaño máximo del punto (px)
+
+/* ---------- estado ---------- */
+let FP = {};                           // parámetros aleatorios de la huella
+let t0 = 0;                            // inicio de la construcción
+let eased = -1;                        // frente de revelado
+let pointerActive = true;              // ¿cursor / touch activo?
+let lastGen = 0;                       // anti-rebote de regeneración
+
+const NBUCKET = 6;                     // capas de profundidad
+let palette = [];                      // blanco con distinta opacidad
+let starts  = [];                      // índices de inicio de cada capa
+
+/* ==========================================================================
+   SETUP
+   ========================================================================== */
+function setup(){
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  noStroke();
+  sizeForViewport();
+  newFingerprint();
+}
+
+function sizeForViewport(){
+  if (isMobile){
+    radius_      = min(width, height) * 0.40;
+    repel_radius = 60;
+  } else {
+    radius_      = min(width, height) * 0.34;
+    repel_radius = 90;
+  }
+  radius_ = constrain(radius_, 90, 340);
+}
+
+/* ==========================================================================
+   GENERACIÓN DE LA HUELLA
+   ========================================================================== */
+function newFingerprint(){
+
+  /* --- parámetros aleatorios del campo de crestas --- */
+  FP = {
+    coreX : random(-0.10, 0.10),          // posición del núcleo
+    coreY : -0.08 - random(0.24),
+    freq  : random(12, 18),               // nº de crestas
+    ell   : random(0.78, 0.94),           // achatamiento
+    a1    : random(0.9, 2.6),             // distorsión angular (loop)
+    a2    : random(0.25, 0.80),
+    a3    : random(0.10, 0.38),
+    p1    : random(TWO_PI),
+    p2    : random(TWO_PI),
+    p3    : random(TWO_PI),
+    w1    : random(0.030, 0.075),         // warp global
+    w2    : random(0.012, 0.034),
+    q1    : random(TWO_PI),
+    q2    : random(TWO_PI),
+    n1    : random(0.20, 0.40),           // ruido de fase (bifurcaciones)
+    n2    : random(0.09, 0.22),
+    n3    : random(0.03, 0.10)
+  };
+
+  /* --- paleta: blanco puro con opacidad decreciente hacia el borde --- */
+  palette = [];
+  for (let b = 0; b < NBUCKET; b++){
+    const t = b / (NBUCKET - 1);
+    const a = 1.0 - 0.45 * t;             // 1.00  →  0.55
+    palette.push('rgba(255,255,255,' + a.toFixed(3) + ')');
+  }
+
+  buildPoints();
+  angle = 0;
+  t0 = millis();
+  eased = -1;
+  pointerActive = true;
+}
+
+/* --- muestreo por rechazo: las partículas caen sobre las crestas --- */
+function buildPoints(){
+  const pts = [];
+  const Rx = radius_ * 0.74;
+  const Ry = radius_ * 1.03;
+  const maxAttempts = particles * 90;
+  let attempts = 0;
+
+  while (pts.length < particles && attempts < maxAttempts){
+    attempts++;
+
+    const x = random(-Rx, Rx);
+    const y = random(-Ry, Ry);
+
+    const f = field(x, y);
+    if (!f) continue;
+
+    let acc = f.cov * 1.35;
+    if (acc <= 0) continue;
+    if (acc > 1) acc = 1;
+    if (random(1) > acc) continue;        // probabilidad ∝ cobertura de tinta
+
+    /* orden de aparición: desde el núcleo hacia el borde */
+    const nz = 0.055 * Math.sin(f.dx * 9.3  + f.dy * 7.1  + FP.q1)
+             + 0.030 * Math.sin(f.dx * 15.7 - f.dy * 11.3 + FP.q2);
+    let order = f.rr * 0.70 + nz;
+    order = order < 0 ? 0 : order > 1 ? 1 : order;
+
+    /* capa de profundidad según la distancia al núcleo */
+    const t = Math.min(1, f.rr * 0.85);
+    const bucket = Math.min(NBUCKET - 1, Math.floor(t * NBUCKET));
+
+    /* jitter: da grosor y organicidad a la cresta */
+    const jx = (random(1) + random(1) - 1) * 1.2;
+    const jy = (random(1) + random(1) - 1) * 1.2;
+
+    /* tamaño tipo strokeWeight: los puntos externos algo menores */
+    const sizeScale = 1 - 0.22 * (bucket / (NBUCKET - 1));
+    const size = random(DOT_MIN, DOT_MAX) * sizeScale;
+
+    pts.push({
+      hx: x + jx,  hy: y + jy,            // hogar
+      x : x + jx,  y : y + jy,            // posición actual
+      vx: 0,       vy: 0,
+      order : order,
+      phase : random(TWO_PI),
+      wob   : random(0.7, 1.9),           // radio de la órbita
+      size  : size,
+      bucket: bucket
+    });
+  }
+
+  /* ordenar por capa para dibujar en 6 pasadas rápidas */
+  pts.sort(function(a, b){ return a.bucket - b.bucket; });
+
+  starts = [];
+  let cur = 0;
+  for (let b = 0; b < NBUCKET; b++){
+    starts.push(cur);
+    while (cur < pts.length && pts[cur].bucket === b) cur++;
+  }
+  starts.push(pts.length);
+
+  points = pts;
+}
+
+/* ==========================================================================
+   CAMPO DE CRESTAS DACTILARES
+   Devuelve { cov, rr, dx, dy } o null si el punto cae fuera del dedo.
+   ========================================================================== */
+function field(x, y){
+  const X = x / radius_;
+  const Y = y / radius_;
+
+  const X2 = X / 0.74;
+  const Y2 = Y / 1.03;
+  const q  = Math.sqrt(X2 * X2 + Y2 * Y2);
+  if (q > 1) return null;                     // fuera de la elipse del dedo
+
+  const mask = 1 - sstep(0.955, 1.0, q);      // borde suave
+
+  /* deformación orgánica del espacio */
+  const wx = X + FP.w1 * Math.sin(Y * 4.3 + FP.q1)
+               + FP.w2 * Math.sin(Y * 9.1 + X * 3.3 + FP.q2);
+  const wy = Y + FP.w1 * Math.sin(X * 3.7 + FP.q2)
+               + FP.w2 * Math.sin(X * 8.3 - Y * 4.1 + FP.q1);
+
+  const dx = wx - FP.coreX;
+  const dy = wy - FP.coreY;
+  const ex = dx / FP.ell;
+
+  const rr = Math.sqrt(ex * ex + dy * dy);
+  const th = Math.atan2(dy, ex);
+
+  /* fase: anillos + distorsión angular + ruido */
+  const ramp = sstep(0.02, 0.30, rr);
+
+  let phi = rr * FP.freq
+          + ramp * ( FP.a1 * Math.sin(th + FP.p1)
+                   + FP.a2 * Math.sin(2 * th + FP.p2)
+                   + FP.a3 * Math.sin(3 * th + FP.p3) )
+          + FP.n1 * Math.sin(dx * 5.1  + dy * 3.3  + FP.q1)
+          + FP.n2 * Math.sin(dx * 9.7  - dy * 7.1  + FP.q2)
+          + FP.n3 * Math.sin(dx * 17.3 + dy * 13.7 + FP.q1 * 2);
+
+  /* crestas: coseno de la fase */
+  const c   = Math.cos(phi * TWO_PI);
+  const t   = (c + 1) * 0.5;
+  const ink = sstep(0.50, 0.78, t);
+
+  return { cov: ink * mask, rr: rr, dx: dx, dy: dy };
+}
+
+/* ==========================================================================
+   DRAW
+   ========================================================================== */
+function draw(){
+  background(0);
+  push();
+  translate(width / 2, height / 2);
+
+  const mX = pointerActive ? (mouseX - width / 2) : 1e6;
+  const mY = pointerActive ? (mouseY - height / 2) : 1e6;
+
+  /* --- progreso de construcción --- */
+  const raw = constrain((millis() - t0) / DURATION, 0, 1);
+  const e   = raw * raw * (3 - 2 * raw);          // suavizado
+  eased = e * 1.12 - 0.02;                        // frente de revelado
+
+  const ctx = drawingContext;
+  const n = points.length;
+
+  /* ---------- 1. FÍSICA ---------- */
+  for (let i = 0; i < n; i++){
+    const p = points[i];
+
+    /* hogar oscilante (órbita diminuta => respiración viva) */
+    const hx = p.hx + Math.cos(angle * 1.3 + p.phase) * p.wob;
+    const hy = p.hy + Math.sin(angle * 1.3 + p.phase) * p.wob;
+
+    /* muelle hacia el hogar */
+    let ax = (hx - p.x) * attraction;
+    let ay = (hy - p.y) * attraction;
+
+    /* repulsión del cursor */
+    const dx = p.x - mX;
+    const dy = p.y - mY;
+    const d2 = dx * dx + dy * dy;
+    if (d2 > 0.1 && d2 < repel_radius * repel_radius){
+      const d = Math.sqrt(d2);
+      const f = repel_strength * (1 - d / repel_radius) / d;
+      ax += dx * f;
+      ay += dy * f;
+    }
+
+    /* amortiguación + integración */
+    p.vx = (p.vx + ax) * damping;
+    p.vy = (p.vy + ay) * damping;
+    p.x += p.vx;
+    p.y += p.vy;
+  }
+
+  /* ---------- 2. DIBUJO: PUNTOS CUADRADOS (estilo point()) ---------- */
+  for (let b = 0; b < NBUCKET; b++){
+    ctx.fillStyle = palette[b];
+    const s0 = starts[b], s1 = starts[b + 1];
+    for (let i = s0; i < s1; i++){
+      const p = points[i];
+      if (p.order > eased) continue;              // aún no revelada
+      const s = p.size;
+      ctx.fillRect(p.x - s * 0.5, p.y - s * 0.5, s, s);
+    }
+  }
+
+  /* ---------- 3. FRENTE LUMINOSO DE CONSTRUCCIÓN ---------- */
+  if (raw < 1){
+    ctx.fillStyle = 'rgba(255,255,255,0.90)';
+    const fw = 0.05;
+    for (let i = 0; i < n; i++){
+      const p = points[i];
+      const d = eased - p.order;
+      if (d < 0 || d > fw) continue;
+      const k = 1 - d / fw;
+      const s = p.size * (1.5 + 2.0 * k);
+      ctx.fillRect(p.x - s * 0.5, p.y - s * 0.5, s, s);
+    }
+  }
+
+  angle += 0.01;                                  // rotación / oscilación
+  pop();
+}
+
+/* ==========================================================================
+   INTERACCIÓN  ·  clic / tap  →  nueva huella
+   ========================================================================== */
+function regenerate(){
+  const now = millis();
+  if (now - lastGen < 300) return;   // evita doble disparo en táctil
+  lastGen = now;
+  newFingerprint();
+}
+
+function mousePressed(){
+  pointerActive = true;
+  regenerate();
+  return false;
+}
+
+function touchStarted(){
+  pointerActive = true;
+  regenerate();
+  return false;
+}
+
+function touchMoved(){ pointerActive = true;  return false; }
+function touchEnded(){ pointerActive = false; return false; }
+function mouseMoved(){ pointerActive = true; }
+
+/* ---------- redimensionado ---------- */
+function windowResized(){
+  resizeCanvas(windowWidth, windowHeight);
+  sizeForViewport();
+  buildPoints();                 // conserva el diseño y reescala las partículas
+  t0 = millis();
+  eased = -1;
+}
+
+/* ==========================================================================
+   UTILIDADES
+   ========================================================================== */
+function sstep(e0, e1, x){
+  let t = (x - e0) / (e1 - e0);
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  return t * t * (3 - 2 * t);
+}
+</script>
+</body>
+</html>

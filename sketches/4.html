@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gas interestelar - GPU particles</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #02030a;
+      font-family: monospace;
+    }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .hint {
+      position: fixed;
+      top: 12px;
+      left: 14px;
+      color: rgba(255,255,255,0.30);
+      font-size: 12px;
+      pointer-events: none;
+      user-select: none;
+    }
+    .watermark {
+    position: absolute;
+    left: 50%;
+    bottom: 3.2%;
+    transform: translateX(-50%);
+    color: rgba(255, 255, 255, 0.28);
+    font-size: clamp(12px, 1.9vh, 36px);
+    letter-spacing: 0.04em;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+}
+
+  </style>
+</head>
+<body>
+  <canvas id="gl"></canvas>
+  <div class="watermark">@Captura_Casual | 2026</div>
+
+  <script>
+  // ============================================================
+  // Gas interestelar abstracto con WebGL2 + transform feedback.
+  //
+  // - Cientos de miles de partículas viven en la GPU.
+  // - Cada frame, un shader de actualización lee el estado previo
+  //   y escribe el nuevo estado en otro buffer (ping-pong).
+  // - El movimiento viene de un campo de flujo derivado de ruido
+  //   simplex 3D (posición + tiempo), con un vórtice suave hacia
+  //   el centro y una deflexión opcional por el ratón.
+  // - El render usa blending aditivo y un quad de atenuación para
+  //   dejar estelas largas, como en una foto de larga exposición.
+  // ============================================================
+
+  // -------------------- Configuración --------------------
+  const PARTICLE_COUNT = 120000;   // ajusta según tu GPU
+  const FLOATS_PER_PARTICLE = 6;   // pos.xy, vel.xy, age, lifespan
+  const FADE_ALPHA = 0.08;         // 0.02 = estelas muy largas, 0.2 = cortas
+
+  // -------------------- Contexto WebGL2 --------------------
+  const canvas = document.getElementById('gl');
+  const gl = canvas.getContext('webgl2', {
+    antialias: false,
+    alpha: false,
+    premultipliedAlpha: true,
+    powerPreference: 'high-performance'
+  });
+
+  if (!gl) {
+    document.body.innerHTML =
+      '<p style="color:#fff;font-family:monospace;padding:20px">' +
+      'Este navegador no soporta WebGL2.</p>';
+    throw new Error('WebGL2 no disponible');
+  }
+
+  // -------------------- Utilidades --------------------
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(s), src);
+      throw new Error('Error al compilar shader');
+    }
+    return s;
+  }
+
+  function link(vsSrc, fsSrc, tfVaryings) {
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, vsSrc));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsSrc));
+    if (tfVaryings) {
+      gl.transformFeedbackVaryings(p, tfVaryings, gl.INTERLEAVED_ATTRIBS);
+    }
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      console.error(gl.getProgramInfoLog(p));
+      throw new Error('Error al enlazar programa');
+    }
+    return p;
+  }
+
+  // -------------------- Ruido simplex (Ashima) --------------------
+  // Se usa tanto en el update como en el render para mantener
+  // consistencia en la estructura del campo.
+  const NOISE_GLSL = `
+    vec3 mod289(vec3 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
+    vec4 mod289(vec4 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
+    vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+    vec4 taylorInvSqrt(vec4 r) {
+      return 1.79284291400159 - 0.85373472095314 * r;
+    }
+
+    float snoise(vec3 v) {
+      const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+      const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+
+      vec3 i  = floor(v + dot(v, C.yyy));
+      vec3 x0 = v - i + dot(i, C.xxx);
+
+      vec3 g = step(x0.yzx, x0.xyz);
+      vec3 l = 1.0 - g;
+      vec3 i1 = min(g.xyz, l.zxy);
+      vec3 i2 = max(g.xyz, l.zxy);
+
+      vec3 x1 = x0 - i1 + C.xxx;
+      vec3 x2 = x0 - i2 + C.yyy;
+      vec3 x3 = x0 - D.yyy;
+
+      i = mod289(i);
+      vec4 p = permute(permute(permute(
+                 i.z + vec4(0.0, i1.z, i2.z, 1.0))
+               + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+               + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+
+      float n_ = 0.142857142857;
+      vec3 ns = n_ * D.wyz - D.xzx;
+
+      vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+      vec4 x_ = floor(j * ns.z);
+      vec4 y_ = floor(j - 7.0 * x_);
+
+      vec4 x = x_ * ns.x + ns.yyyy;
+      vec4 y = y_ * ns.x + ns.yyyy;
+      vec4 h = 1.0 - abs(x) - abs(y);
+
+      vec4 b0 = vec4(x.xy, y.xy);
+      vec4 b1 = vec4(x.zw, y.zw);
+
+      vec4 s0 = floor(b0) * 2.0 + 1.0;
+      vec4 s1 = floor(b1) * 2.0 + 1.0;
+      vec4 sh = -step(h, vec4(0.0));
+
+      vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+      vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+      vec3 p0 = vec3(a0.xy, h.x);
+      vec3 p1 = vec3(a0.zw, h.y);
+      vec3 p2 = vec3(a1.xy, h.z);
+      vec3 p3 = vec3(a1.zw, h.w);
+
+      vec4 norm = taylorInvSqrt(vec4(
+        dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+      p0 *= norm.x;
+      p1 *= norm.y;
+      p2 *= norm.z;
+      p3 *= norm.w;
+
+      vec4 m = max(0.6 - vec4(
+        dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+      m = m * m;
+      return 42.0 * dot(m * m,
+        vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+    }
+
+    vec2 hash22(vec2 p) {
+      vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+      p3 += dot(p3, p3.yzx + 33.33);
+      return fract((p3.xx + p3.yz) * p3.zy);
+    }
+  `;
+
+  // -------------------- Shader de actualización --------------------
+  // Se ejecuta con rasterización desactivada. Solo importa lo que
+  // escriben los "varyings" declarados en transformFeedbackVaryings.
+  const UPDATE_VERT = `#version 300 es
+    precision highp float;
+
+    uniform float uTime;
+    uniform float uDt;
+    uniform vec2  uMouse;         // en NDC
+    uniform float uMouseActive;   // 1.0 si el ratón está dentro
+    uniform vec2  uAspectScale;   // corrección de aspecto
+
+    layout(location = 0) in vec2 aPos;
+    layout(location = 1) in vec2 aVel;
+    layout(location = 2) in vec2 aLife;
+
+    out vec2 vPos;
+    out vec2 vVel;
+    out vec2 vLife;
+
+    ${NOISE_GLSL}
+
+    void main() {
+      float age      = aLife.x;
+      float lifespan = aLife.y;
+
+      vec2 pos = aPos;
+      vec2 vel = aVel;
+
+      if (age >= lifespan) {
+        // --- Renacimiento ---
+        // El identificador de partícula permite generar posiciones
+        // estables. Mezclamos con el tiempo para que la nube se
+        // renueve de forma continua.
+        float id = float(gl_VertexID);
+        vec2 r = hash22(vec2(id, uTime * 0.013));
+
+        float ang = r.x * 6.2831853;
+        float rad = 0.15 + r.y * 0.85;
+        pos = vec2(cos(ang), sin(ang)) * rad;
+
+        // Pequeño desplazamiento por ruido para que no queden anillos
+        pos += vec2(
+          snoise(vec3(pos * 2.0, uTime * 0.05)),
+          snoise(vec3(pos * 2.0 + 100.0, uTime * 0.05))
+        ) * 0.08;
+
+        vel = vec2(0.0);
+        age = 0.0;
+        lifespan = 1.5 + r.x * 4.0;
+      } else {
+        // --- Campo de flujo ---
+        float t = uTime * 0.06;
+        float nA = snoise(vec3(pos * 1.1, t));
+        float nB = snoise(vec3(pos * 1.1 + 137.0, t));
+
+        // Convertimos el ruido en un ángulo: esto produce
+        // corrientes continuas, no direcciones aleatorias.
+        float ang = (nA * 0.7 + nB * 0.3) * 6.2831853 * 2.5;
+        vec2 force = vec2(cos(ang), sin(ang));
+
+        // --- Vórtice hacia el centro ---
+        // Decae con la distancia: en los bordes casi no actúa.
+        vec2 toC = -pos;
+        float dC = length(toC) + 0.0001;
+        vec2 tang = vec2(-toC.y, toC.x) / dC;
+        force += tang * 0.9 * exp(-dC * 1.2);
+
+        // --- Deflexión por el ratón ---
+        // No atrae ni expulsa: solo empuja lateralmente cerca del cursor.
+        if (uMouseActive > 0.5) {
+          vec2 mouseWorld = uMouse / uAspectScale;
+          vec2 toM = mouseWorld - pos;
+          float dM = length(toM);
+          if (dM < 0.55 && dM > 0.001) {
+            force += (toM / dM) * (1.0 - dM / 0.55) * 2.0;
+          }
+        }
+
+        // Integración con rozamiento
+        vel += force * uDt;
+        vel *= 0.97;
+        pos += vel * uDt;
+        age += uDt;
+      }
+
+      vPos  = pos;
+      vVel  = vel;
+      vLife = vec2(age, lifespan);
+    }
+  `;
+
+  const UPDATE_FRAG = `#version 300 es
+    precision mediump float;
+    out vec4 fragColor;
+    void main() { fragColor = vec4(0.0); }
+  `;
+
+  // -------------------- Shader de render --------------------
+  // Se lee el estado actual y se dibuja como gl.POINTS con tamaño
+  // pequeño. El fragment shader aplica una caída exponencial para
+  // que cada punto sea un halo suave, no un cuadrado.
+  const RENDER_VERT = `#version 300 es
+    precision highp float;
+
+    uniform float uDpr;
+    uniform vec2  uAspectScale;
+
+    layout(location = 0) in vec2 aPos;
+    layout(location = 1) in vec2 aVel;
+    layout(location = 2) in vec2 aLife;
+
+    out float vFade;
+    out vec3  vColor;
+
+    void main() {
+      float t = clamp(aLife.x / aLife.y, 0.0, 1.0);
+
+      // Curva de opacidad: nace, alcanza un máximo, muere.
+      vFade = sin(t * 3.14159265);
+
+      float speed = length(aVel);
+
+      // Color por velocidad: polvo frío cuando va lento,
+      // polvo cálido cuando el flujo lo arrastra rápido.
+      vec3 cold = vec3(0.22, 0.42, 1.00);
+      vec3 mid  = vec3(0.62, 0.52, 1.00);
+      vec3 warm = vec3(1.00, 0.66, 0.42);
+      float s = clamp(speed * 2.2, 0.0, 1.0);
+      vColor = s < 0.5
+        ? mix(cold, mid, s * 2.0)
+        : mix(mid, warm, (s - 0.5) * 2.0);
+
+      // Tamaño dependiente de la velocidad, en píxeles físicos.
+      gl_PointSize = (1.0 + speed * 2.6) * uDpr;
+
+      // Corrección de aspecto: el "espacio de mundo" tiene
+      // escala 1.0 = mitad de la dimensión menor de la ventana.
+      vec2 ndc = aPos * uAspectScale;
+      gl_Position = vec4(ndc, 0.0, 1.0);
+    }
+  `;
+
+  const RENDER_FRAG = `#version 300 es
+    precision highp float;
+
+    in float vFade;
+    in vec3  vColor;
+    out vec4 fragColor;
+
+    void main() {
+      // Coordenada local del punto: -0.5..0.5 en cada eje.
+      vec2 c = gl_PointCoord - 0.5;
+      float d2 = dot(c, c);
+
+      // Descartamos fuera del círculo inscrito.
+      if (d2 > 0.25) discard;
+
+      // Caída exponencial: centro brillante, bordes suaves.
+      float mask = exp(-d2 * 14.0);
+
+      // Intensidad global baja: se acumula por superposición.
+      float intensity = mask * vFade * 0.15;
+
+      // Premultiplicado: el blend es (ONE, ONE).
+      fragColor = vec4(vColor * intensity, intensity);
+    }
+  `;
+
+  // -------------------- Shader del quad de atenuación --------------------
+  // Cada frame oscurece el lienzo un poco. Este es el mecanismo que
+  // produce las estelas largas: la luz antigua se desvanece muy lento
+  // mientras el polvo sigue dibujando encima.
+  const FADE_VERT = `#version 300 es
+    layout(location = 0) in vec2 aPos;
+    void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+  `;
+
+  const FADE_FRAG = `#version 300 es
+    precision mediump float;
+    uniform float uAlpha;
+    out vec4 fragColor;
+    void main() { fragColor = vec4(0.008, 0.012, 0.030, uAlpha); }
+  `;
+
+  // -------------------- Creación de programas --------------------
+  const updateProg = link(UPDATE_VERT, UPDATE_FRAG, ['vPos', 'vVel', 'vLife']);
+  const renderProg = link(RENDER_VERT, RENDER_FRAG);
+  const fadeProg   = link(FADE_VERT, FADE_FRAG);
+
+  // Localizaciones de uniforms
+  const uUpdate = {
+    time:         gl.getUniformLocation(updateProg, 'uTime'),
+    dt:           gl.getUniformLocation(updateProg, 'uDt'),
+    mouse:        gl.getUniformLocation(updateProg, 'uMouse'),
+    mouseActive:  gl.getUniformLocation(updateProg, 'uMouseActive'),
+    aspectScale:  gl.getUniformLocation(updateProg, 'uAspectScale')
+  };
+  const uRender = {
+    dpr:         gl.getUniformLocation(renderProg, 'uDpr'),
+    aspectScale: gl.getUniformLocation(renderProg, 'uAspectScale')
+  };
+  const uFade = {
+    alpha: gl.getUniformLocation(fadeProg, 'uAlpha')
+  };
+
+  // -------------------- Estado inicial de partículas --------------------
+  const initialState = new Float32Array(PARTICLE_COUNT * FLOATS_PER_PARTICLE);
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const o = i * FLOATS_PER_PARTICLE;
+    const ang = Math.random() * Math.PI * 2;
+    const rad = Math.sqrt(Math.random()) * 0.85;
+    initialState[o + 0] = Math.cos(ang) * rad;          // x
+    initialState[o + 1] = Math.sin(ang) * rad;          // y
+    initialState[o + 2] = 0;                            // vx
+    initialState[o + 3] = 0;                            // vy
+    initialState[o + 4] = Math.random() * 3.0;          // age
+    initialState[o + 5] = 1.5 + Math.random() * 4.0;    // lifespan
+  }
+
+  // -------------------- Buffers y VAOs --------------------
+  const strideBytes = FLOATS_PER_PARTICLE * 4;
+
+  function createBuffer() {
+    const b = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, initialState, gl.DYNAMIC_COPY);
+    return b;
+  }
+
+  function createParticleVAO(buf) {
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, strideBytes, 0);   // pos
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, strideBytes, 8);   // vel
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 2, gl.FLOAT, false, strideBytes, 16);  // life
+    gl.bindVertexArray(null);
+    return vao;
+  }
+
+  // Ping-pong: un par de (buffer, VAO) por cada mitad del ciclo.
+  let stateA = { buf: createBuffer(), vao: null };
+  let stateB = { buf: createBuffer(), vao: null };
+  stateA.vao = createParticleVAO(stateA.buf);
+  stateB.vao = createParticleVAO(stateB.buf);
+
+  const tf = gl.createTransformFeedback();
+
+  // VAO del quad de atenuación (dos triángulos que cubren NDC)
+  const fadeVAO = gl.createVertexArray();
+  gl.bindVertexArray(fadeVAO);
+  const fadeBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, fadeBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1, -1,  1, -1, -1,  1,
+    -1,  1,  1, -1,  1,  1
+  ]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  // -------------------- Ajuste de tamaño --------------------
+  let dpr = 1;
+  let aspectScale = [1, 1];
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.floor(window.innerWidth  * dpr);
+    const h = Math.floor(window.innerHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    gl.viewport(0, 0, w, h);
+
+    const aspect = w / h;
+    aspectScale[0] = Math.min(1.0, 1.0 / aspect);
+    aspectScale[1] = Math.min(1.0, aspect);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // -------------------- Entrada del ratón --------------------
+  const mouse = { x: 0, y: 0, active: 0 };
+  canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    mouse.x = ((e.clientX - rect.left) / rect.width)  * 2 - 1;
+    mouse.y = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
+    mouse.active = 1;
+  });
+  canvas.addEventListener('mouseleave', () => { mouse.active = 0; });
+  canvas.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 0) return;
+    const rect = canvas.getBoundingClientRect();
+    const t = e.touches[0];
+    mouse.x = ((t.clientX - rect.left) / rect.width)  * 2 - 1;
+    mouse.y = -(((t.clientY - rect.top) / rect.height) * 2 - 1);
+    mouse.active = 1;
+  }, { passive: true });
+  canvas.addEventListener('touchend', () => { mouse.active = 0; });
+
+  // -------------------- Bucle principal --------------------
+  let lastTime = performance.now();
+  const startTime = lastTime;
+
+  function frame() {
+    const now = performance.now();
+    const dt  = Math.min((now - lastTime) / 1000, 0.05);
+    lastTime = now;
+    const time = (now - startTime) / 1000;
+
+    // ---- 1. Atenuación del fotograma anterior ----
+    gl.disable(gl.BLEND);
+    gl.useProgram(fadeProg);
+    gl.uniform1f(uFade.alpha, FADE_ALPHA);
+    gl.bindVertexArray(fadeVAO);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+
+    // ---- 2. Actualización por transform feedback ----
+    gl.useProgram(updateProg);
+    gl.uniform1f(uUpdate.time, time);
+    gl.uniform1f(uUpdate.dt, dt);
+    gl.uniform2f(uUpdate.mouse, mouse.x, mouse.y);
+    gl.uniform1f(uUpdate.mouseActive, mouse.active);
+    gl.uniform2f(uUpdate.aspectScale, aspectScale[0], aspectScale[1]);
+
+    gl.bindVertexArray(stateA.vao);
+    gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tf);
+    gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, stateB.buf);
+
+    gl.enable(gl.RASTERIZER_DISCARD);
+    gl.beginTransformFeedback(gl.POINTS);
+    gl.drawArrays(gl.POINTS, 0, PARTICLE_COUNT);
+    gl.endTransformFeedback();
+    gl.disable(gl.RASTERIZER_DISCARD);
+
+    gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
+    gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+    gl.bindVertexArray(null);
+
+    // Intercambio: stateB contiene el estado actualizado.
+    const tmp = stateA;
+    stateA = stateB;
+    stateB = tmp;
+
+    // ---- 3. Render aditivo ----
+    gl.useProgram(renderProg);
+    gl.uniform1f(uRender.dpr, dpr);
+    gl.uniform2f(uRender.aspectScale, aspectScale[0], aspectScale[1]);
+
+    gl.enable(gl.BLEND);
+    // Premultiplicado: sumamos directamente lo que devuelve el shader.
+    gl.blendFunc(gl.ONE, gl.ONE);
+
+    gl.bindVertexArray(stateA.vao);
+    gl.drawArrays(gl.POINTS, 0, PARTICLE_COUNT);
+    gl.bindVertexArray(null);
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
