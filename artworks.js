@@ -17,6 +17,27 @@ const artworks = [
     archivo: "3.html",
     descripcion: "Thousands of particles drift along animated 3D noise currents, picking up colors from an imaginary planet's biomes."
   },
+
+  {
+    titulo: "Stardust",
+    archivo: "4.html",
+    descripcion: "120,000 particles Following invisible currents of noise."
+  },
+
+  {
+    titulo: "Fingerprint",
+    archivo: "5.html",
+    descripcion: "Every fingerprint tells a story."
+  },
+
+  {
+    titulo: "Generative Rubik’s cube",
+    archivo: "6.html",
+    descripcion: "From scattered pieces to a perfectly solved cube."
+  },
+
+
+  
   
   // Añade más obras aquí...
 ];
