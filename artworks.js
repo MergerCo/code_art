@@ -36,6 +36,30 @@ const artworks = [
     descripcion: "From scattered pieces to a perfectly solved cube."
   },
 
+  {
+    titulo: "living flow field",
+    archivo: "7.html",
+    descripcion: "A living flow field in motion. Generative lines drift, loop, and dissolve across a dark canvas."
+  },
+
+  {
+    titulo: "Cellular automata",
+    archivo: "8.html",
+    descripcion: "A living canvas of reaction-diffusion chemistry. A frame that never repeats."
+  },
+
+  {
+    titulo: "living mandala",
+    archivo: "9.html",
+    descripcion: "Eight layers of dots, arcs, petals and lines rotate at their own speeds."
+  },
+
+  {
+    titulo: "Generative Mandala",
+    archivo: "10.html",
+    descripcion: "a living kaleidoscope of light, symmetry, and motion. Every frame is coded in real time, never repeated."
+  },
+
 
   
   
