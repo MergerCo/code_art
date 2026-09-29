@@ -37,7 +37,7 @@ const artworks = [
   },
 
   {
-    titulo: "living flow field",
+    titulo: "Living flow field",
     archivo: "7.html",
     descripcion: "A living flow field in motion. Generative lines drift, loop, and dissolve across a dark canvas."
   },
@@ -49,7 +49,7 @@ const artworks = [
   },
 
   {
-    titulo: "living mandala",
+    titulo: "Living mandala",
     archivo: "9.html",
     descripcion: "Eight layers of dots, arcs, petals and lines rotate at their own speeds."
   },
