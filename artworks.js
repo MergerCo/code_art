@@ -57,7 +57,7 @@ const artworks = [
   {
     titulo: "Generative Mandala",
     archivo: "10.html",
-    descripcion: "a living kaleidoscope of light, symmetry, and motion. Every frame is coded in real time, never repeated."
+    descripcion: "A living kaleidoscope of light, symmetry, and motion. Every frame is coded in real time, never repeated."
   },
 
 
