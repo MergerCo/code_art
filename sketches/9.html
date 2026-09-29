@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mandala Generativo</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #05070d;
+  }
+  #escena {
+    position: fixed;
+    inset: 0;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none; /* evita el desplazamiento tactil sobre el lienzo */
+  }
+
+  /* Marca de agua */
+  .watermark {
+    position: absolute;
+    left: 50%;
+    bottom: 3.2%;
+    transform: translateX(-50%);
+    color: rgba(255, 255, 255, 0.28);
+    font-size: clamp(12px, 1.9vh, 36px);
+    letter-spacing: 0.04em;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+  }
+
+  /* Texto de ayuda: se adapta al ancho y alto del lienzo */
+  #ayuda {
+    position: absolute;
+    top: 2.6%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(92vw, 900px);
+    padding: 0 0.6rem;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.34);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: clamp(10px, 1.6vmin, 15px);
+    letter-spacing: 0.06em;
+    line-height: 1.5;
+    white-space: normal;      /* permite varias lineas en pantallas angostas */
+    overflow-wrap: break-word;
+    pointer-events: none;
+    user-select: none;
+    transition: opacity 1.4s ease;
+  }
+</style>
+</head>
+<body>
+
+<div id="escena">
+  <canvas id="lienzo"></canvas>
+  <div id="ayuda">mueve el puntero &middot; rueda: simetria &middot; clic: onda &middot; espacio: pausa</div>
+  <div class="watermark">@Captura_Casual | 2026</div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const lienzo = document.getElementById("lienzo");
+  const ctx = lienzo.getContext("2d");
+  const ayuda = document.getElementById("ayuda");
+
+  let W = 0, H = 0, DPR = 1;
+
+  // Ajusta el lienzo al tamano de la ventana teniendo en cuenta la densidad de pixeles
+  function ajustarTamano() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    lienzo.width = Math.round(W * DPR);
+    lienzo.height = Math.round(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+
+  // ---------------------------------------------------------------
+  // Estado general de la pieza
+  // ---------------------------------------------------------------
+  const estado = {
+    t: 0,             // tiempo acumulado en segundos
+    pausa: false,
+    simetria: 12,     // numero de sectores del mandala
+    hue: 200,         // tono base actual
+    mx: 0.5,          // posicion horizontal del puntero (0 a 1)
+    my: 0.5,          // posicion vertical del puntero (0 a 1)
+    energia: 0,       // sube con la interaccion y decae sola
+    ondas: []         // pulsos expansivos creados con el clic
+  };
+
+  // ---------------------------------------------------------------
+  // Definicion de las capas del mandala.
+  // Cada capa se repite en los N sectores y tiene su propio giro.
+  // Los radios son fracciones del radio maestro R.
+  // ---------------------------------------------------------------
+  const capas = [
+    { tipo: "puntos",  r: 0.13, tam: 0.013, hue:   0, vel:  0.05, espejo: false, brillo: 0.85 },
+    { tipo: "arcos",   r: 0.25, tam: 0.10,  hue:  35, vel: -0.09, espejo: false, brillo: 0.65 },
+    { tipo: "petalos", r0: 0.19, r1: 0.50, ancho: 0.055, hue:  70, vel: 0.07, espejo: true, brillo: 0.50 },
+    { tipo: "lineas",  r0: 0.30, r1: 0.72, hue: 120, vel: -0.04, espejo: true, brillo: 0.42 },
+    { tipo: "puntos",  r: 0.60, tam: 0.020, hue: 175, vel:  0.11, espejo: false, brillo: 0.75 },
+    { tipo: "arcos",   r: 0.78, tam: 0.14,  hue: 215, vel:  0.06, espejo: false, brillo: 0.55 },
+    { tipo: "petalos", r0: 0.54, r1: 0.93, ancho: 0.034, hue: 285, vel: -0.05, espejo: true, brillo: 0.38 },
+    { tipo: "puntos",  r: 0.97, tam: 0.009, hue: 320, vel:  0.15, espejo: false, brillo: 0.60 }
+  ];
+
+  // ---------------------------------------------------------------
+  // Dibujo de un brazo (la forma que se repite en cada sector).
+  // Se dibuja siempre sobre el eje +X, la rotacion la aplica el padre.
+  // ---------------------------------------------------------------
+  function dibujarBrazo(capa, R, color) {
+    const energia = estado.energia;
+
+    switch (capa.tipo) {
+
+      case "lineas": {
+        ctx.beginPath();
+        ctx.moveTo(R * capa.r0, 0);
+        ctx.lineTo(R * capa.r1, 0);
+        ctx.lineWidth = 0.8 + energia * 1.6;
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = capa.brillo * 0.6;
+        ctx.stroke();
+        break;
+      }
+
+      case "puntos": {
+        const x = R * capa.r;
+        ctx.beginPath();
+        ctx.arc(x, 0, R * capa.tam * (1 + energia * 0.7), 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.globalAlpha = capa.brillo * 0.8;
+        ctx.fill();
+        break;
+      }
+
+      case "petalos": {
+        const r0 = R * capa.r0;
+        const r1 = R * capa.r1;
+        const a  = R * capa.ancho * (1 + energia * 0.25);
+        // Puntos de control cercanos a los extremos para lograr forma de hoja
+        const rm = r0 + (r1 - r0) * 0.15;
+        const rn = r1 - (r1 - r0) * 0.15;
+
+        ctx.beginPath();
+        ctx.moveTo(r0, 0);
+        ctx.bezierCurveTo(rm, -a, rn, -a, r1, 0);
+        ctx.bezierCurveTo(rn,  a, rm,  a, r0, 0);
+        ctx.closePath();
+
+        ctx.globalAlpha = capa.brillo * 0.30;
+        ctx.fillStyle = color;
+        ctx.fill();
+
+        ctx.globalAlpha = capa.brillo * 0.70;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+        break;
+      }
+
+      case "arcos": {
+        const r = R * capa.r;
+        // Cada arco ocupa algo menos que medio sector
+        const span = (Math.PI / estado.simetria) * 0.85;
+        ctx.beginPath();
+        ctx.arc(0, 0, r, -span, span);
+        ctx.lineWidth = Math.max(1, R * capa.tam * 0.05);
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = capa.brillo * 0.7;
+        ctx.stroke();
+        break;
+      }
+    }
+  }
+
+  // Recorre los N sectores y dibuja el brazo, con su reflejo si corresponde
+  function dibujarCapa(capa, R) {
+    const N = estado.simetria;
+    const paso = (Math.PI * 2) / N;
+    const giro = estado.t * capa.vel;
+
+    // Respiracion lenta que se acentua con la interaccion
+    const pulso = 1
+      + 0.04 * Math.sin(estado.t * 0.8 + capa.hue * 0.03)
+      + estado.energia * 0.05;
+
+    const color = "hsl(" + ((estado.hue + capa.hue) % 360 + 360) % 360 + " 85% 62%)";
+
+    for (let i = 0; i < N; i++) {
+      ctx.save();
+      ctx.rotate(i * paso + giro);
+      ctx.globalAlpha = 1;
+      dibujarBrazo(capa, R * pulso, color);
+
+      if (capa.espejo) {
+        // Reflejo respecto al eje radial: duplica los brazos del sector
+        ctx.scale(1, -1);
+        dibujarBrazo(capa, R * pulso, color);
+      }
+      ctx.restore();
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Actualizacion del estado (independiente del dibujo)
+  // ---------------------------------------------------------------
+  function actualizar(dt) {
+    if (estado.pausa) return;
+
+    estado.t += dt;
+
+    // La energia decae de forma exponencial
+    estado.energia *= Math.pow(0.25, dt);
+
+    // El tono sigue al puntero y ademas tiene una deriva lenta propia
+    const objetivo = 175 + estado.mx * 150 + Math.sin(estado.t * 0.13) * 20;
+    estado.hue += (objetivo - estado.hue) * Math.min(1, dt * 1.8);
+
+    // Ondas expansivas
+    for (let i = estado.ondas.length - 1; i >= 0; i--) {
+      const o = estado.ondas[i];
+      o.r += dt * 0.55;
+      o.vida -= dt * 0.75;
+      if (o.vida <= 0) estado.ondas.splice(i, 1);
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Dibujo de un fotograma
+  // ---------------------------------------------------------------
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+
+    // Velo semitransparente: genera la estela del fotograma anterior
+    ctx.fillStyle = "rgba(5, 7, 13, 0.13)";
+    ctx.fillRect(0, 0, W, H);
+
+    // A partir de aqui se suma la luz en lugar de taparla
+    ctx.globalCompositeOperation = "lighter";
+
+    const R = Math.min(W, H) * 0.42 * (0.94 + estado.my * 0.12 + estado.energia * 0.05);
+
+    ctx.save();
+    ctx.translate(W / 2, H / 2);
+
+    // Nucleo luminoso
+    const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, R * 0.36);
+    grad.addColorStop(0.0, "hsla(" + estado.hue + ", 90%, 72%, 0.50)");
+    grad.addColorStop(0.4, "hsla(" + (estado.hue + 45) + ", 90%, 55%, 0.12)");
+    grad.addColorStop(1.0, "hsla(0, 0%, 0%, 0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(0, 0, R * 0.36, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Capas del mandala
+    for (const capa of capas) {
+      dibujarCapa(capa, R);
+    }
+
+    // Ondas creadas con el clic
+    ctx.globalAlpha = 1;
+    for (const o of estado.ondas) {
+      const radio = R * (0.04 + o.r);
+      ctx.beginPath();
+      ctx.arc(0, 0, radio, 0, Math.PI * 2);
+      ctx.globalAlpha = Math.max(0, o.vida) * 0.45;
+      ctx.strokeStyle = "hsl(" + o.hue + " 90% 66%)";
+      ctx.lineWidth = 1 + o.vida * 3.5;
+      ctx.stroke();
+    }
+
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  // ---------------------------------------------------------------
+  // Bucle principal
+  // ---------------------------------------------------------------
+  let ultimo = performance.now();
+
+  function bucle(ahora) {
+    const dt = Math.min((ahora - ultimo) / 1000, 0.05);
+    ultimo = ahora;
+
+    actualizar(dt);
+    render();
+
+    requestAnimationFrame(bucle);
+  }
+
+  // ---------------------------------------------------------------
+  // Interaccion
+  // ---------------------------------------------------------------
+  window.addEventListener("resize", ajustarTamano);
+
+  window.addEventListener("pointermove", (e) => {
+    estado.mx = e.clientX / W;
+    estado.my = e.clientY / H;
+    // Cada movimiento aporta algo de energia al sistema
+    estado.energia = Math.min(1, estado.energia + 0.12);
+  });
+
+  window.addEventListener("pointerdown", (e) => {
+    estado.ondas.push({ r: 0, vida: 1, hue: (estado.hue + 60) % 360 });
+    estado.energia = 1;
+  });
+
+  // La rueda cambia el numero de sectores
+  window.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    estado.simetria += e.deltaY > 0 ? -1 : 1;
+    estado.simetria = Math.max(4, Math.min(32, estado.simetria));
+  }, { passive: false });
+
+  // Teclado: la barra espaciadora pausa o reanuda la animacion
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Space") {
+      e.preventDefault();
+      estado.pausa = !estado.pausa;
+    }
+  });
+
+  // ---------------------------------------------------------------
+  // Arranque
+  // ---------------------------------------------------------------
+  ajustarTamano();
+  requestAnimationFrame(bucle);
+
+  // El texto de ayuda se desvanece tras unos segundos
+  setTimeout(() => { ayuda.style.opacity = "0"; }, 9000);
+})();
+</script>
+</body>
+</html>

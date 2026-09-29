@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Autómata Celular — Captura Casual 2026</title>
+<style>
+  :root {
+    --ink: #e8e6df;
+    /* Margen exterior fluido: nunca estorba en pantallas pequeñas */
+    --pad: clamp(8px, 2vmin, 24px);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(120% 90% at 50% 0%, #0d1018 0%, #06070c 62%);
+    color: var(--ink);
+    font-family: ui-sans-serif, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+    display: grid;
+    place-items: center;
+    padding: var(--pad);
+    overflow: hidden;              /* la obra siempre cabe, sin scroll */
+  }
+
+  @supports (height: 100dvh) {
+    body { min-height: 100dvh; }   /* respeta barras dinámicas del móvil */
+  }
+
+  /* ------------------------------------------------------------------
+     Marco de la obra.
+     Mantiene la proporción 3:4 y se ajusta SIEMPRE al espacio
+     disponible: manda el lado más restrictivo (ancho o alto).
+     El ancho se calcula como el menor entre:
+       · el ancho del viewport menos márgenes
+       · el alto disponible * 3/4
+     Así nunca desborda ni en horizontal ni en vertical.
+  ------------------------------------------------------------------ */
+  #stage {
+    position: relative;
+    width: min(
+      calc(100vw - 2 * var(--pad)),
+      calc((100vh - 2 * var(--pad)) * 3 / 4)
+    );
+    aspect-ratio: 3 / 4;
+    background: #000;
+    overflow: hidden;
+    box-shadow:
+      0 24px 60px rgba(0, 0, 0, 0.65),
+      0 0 0 1px rgba(255, 255, 255, 0.07);
+    /* Contenedor de consulta: permite medir la marca de agua
+       en función de la altura real del marco, no del viewport */
+    container-type: size;
+  }
+
+  @supports (height: 100dvh) {
+    #stage {
+      width: min(
+        calc(100vw - 2 * var(--pad)),
+        calc((100dvh - 2 * var(--pad)) * 3 / 4)
+      );
+    }
+  }
+
+  #art {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* Marca de agua: escala con la altura del marco (2.1% de H),
+     la misma regla que se usa al exportar */
+  .watermark {
+    position: absolute;
+    left: 50%;
+    bottom: 3.2%;
+    transform: translateX(-50%);
+    color: rgba(255, 255, 255, 0.92);
+    font-size: 14px;        /* respaldo para navegadores sin cq units */
+    font-size: 2.1cqh;      /* 2.1% de la altura del marco */
+    letter-spacing: 0.04em;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+   
+/* --- Fondo negro semitransparente solo detrás de la marca --- */
+  background: rgba(0, 0, 0, 0.65);            /* negro al 55% de opacidad */
+  padding: 0.35em 0.9em;                      /* aire alrededor del texto */
+  border-radius: 999px;                       /* forma de píldora */
+  border: 1px solid rgba(255, 255, 255, 0.08);/* borde sutil opcional */
+  backdrop-filter: blur(1px);                 /* desenfoca lo que hay detrás */
+  -webkit-backdrop-filter: blur(1px);         /* soporte Safari */
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45); /* sombra suave para despegarlo */
+  }
+
+</style>
+</head>
+<body>
+
+  <div id="stage">
+    <canvas id="art"></canvas>
+    <div class="watermark">@Captura_Casual | 2026</div>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  /* ------------------------------------------------------------------
+     1. Rejilla de simulación
+     La simulación vive siempre en 480x640 (proporción 3:4). El lienzo
+     visible se adapta al dispositivo y reescala esta rejilla.
+  ------------------------------------------------------------------ */
+  const SW = 480;
+  const SH = 640;
+  const N  = SW * SH;
+
+  /* ------------------------------------------------------------------
+     2. Modelo reacción-difusión (Gray-Scott)
+     Dos sustancias: u (alimento) y v (producto). La retroalimentación
+     u + 2v -> 3v genera estructuras tipo coral.
+  ------------------------------------------------------------------ */
+  let u  = new Float32Array(N);
+  let v  = new Float32Array(N);
+  let u2 = new Float32Array(N);
+  let v2 = new Float32Array(N);
+
+  const Du = 0.16;   // difusión de u
+  const Dv = 0.08;   // difusión de v
+  const FEED_BASE = 0.0365;
+  const KILL_BASE = 0.0605;
+
+  let feed = FEED_BASE;
+  let kill = KILL_BASE;
+
+  // Tablas de vecinos con envoltura (condiciones toroidales)
+  const XM = new Int32Array(SW);
+  const XP = new Int32Array(SW);
+  for (let x = 0; x < SW; x++) {
+    XM[x] = (x - 1 + SW) % SW;
+    XP[x] = (x + 1) % SW;
+  }
+
+  /* ------------------------------------------------------------------
+     3. Autómata celular "Game of Life"
+     Rejilla más gruesa: cada célula ocupa un bloque de 4x4 píxeles.
+     Los nacimientos siembran producto químico en la rejilla anterior.
+  ------------------------------------------------------------------ */
+  const CS = 4;
+  const GW = SW / CS;   // 120
+  const GH = SH / CS;   // 160
+
+  let gol     = new Uint8Array(GW * GH);
+  let golNext = new Uint8Array(GW * GH);
+
+  const GXM = new Int32Array(GW);
+  const GXP = new Int32Array(GW);
+  for (let x = 0; x < GW; x++) {
+    GXM[x] = (x - 1 + GW) % GW;
+    GXP[x] = (x + 1) % GW;
+  }
+
+  /* ------------------------------------------------------------------
+     4. Paleta y tabla de color precalculada
+     Se interpola una rampa de tonos fríos a cálidos y se guarda en una
+     LUT de 256 entradas para no repetir el cálculo en cada píxel.
+  ------------------------------------------------------------------ */
+  const STOPS = [
+    [0.00, [6,   8,  20]],
+    [0.16, [12, 28,  56]],
+    [0.34, [22, 70,  92]],
+    [0.52, [40, 124, 116]],
+    [0.68, [112, 178, 132]],
+    [0.82, [222, 186, 118]],
+    [1.00, [255, 245, 218]]
+  ];
+
+  const LUT = new Uint8Array(256 * 3);
+  (function buildLUT() {
+    for (let i = 0; i < 256; i++) {
+      const t = i / 255;
+      let a = STOPS[0];
+      let b = STOPS[STOPS.length - 1];
+      for (let s = 0; s < STOPS.length - 1; s++) {
+        if (t >= STOPS[s][0] && t <= STOPS[s + 1][0]) {
+          a = STOPS[s];
+          b = STOPS[s + 1];
+          break;
+        }
+      }
+      const span = (b[0] - a[0]) || 1;
+      const k = (t - a[0]) / span;
+      LUT[i * 3]     = Math.round(a[1][0] + (b[1][0] - a[1][0]) * k);
+      LUT[i * 3 + 1] = Math.round(a[1][1] + (b[1][1] - a[1][1]) * k);
+      LUT[i * 3 + 2] = Math.round(a[1][2] + (b[1][2] - a[1][2]) * k);
+    }
+  })();
+
+  /* ------------------------------------------------------------------
+     5. Inicialización
+  ------------------------------------------------------------------ */
+  function seedBlob(cx, cy, radius) {
+    for (let y = cy - radius; y <= cy + radius; y++) {
+      for (let x = cx - radius; x <= cx + radius; x++) {
+        const dx = x - cx;
+        const dy = y - cy;
+        if (dx * dx + dy * dy > radius * radius) continue;
+        const xi = (x + SW) % SW;
+        const yi = (y + SH) % SH;
+        const i = yi * SW + xi;
+        v[i] = 1;
+        u[i] = 0.25;
+      }
+    }
+  }
+
+  function seedCell(gx, gy) {
+    // Convierte una célula del autómata en un pequeño núcleo químico
+    const cx = gx * CS + 2;
+    const cy = gy * CS + 2;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const x = (cx + dx + SW) % SW;
+        const y = (cy + dy + SH) % SH;
+        const i = y * SW + x;
+        v[i] = 1;
+        u[i] = 0.25;
+      }
+    }
+  }
+
+  function initAll() {
+    u.fill(1);
+    v.fill(0);
+
+    // Semillas iniciales repartidas por el lienzo
+    for (let b = 0; b < 16; b++) {
+      seedBlob(
+        Math.floor(Math.random() * SW),
+        Math.floor(Math.random() * SH),
+        4 + Math.floor(Math.random() * 4)
+      );
+    }
+
+    // Autómata con densidad inicial moderada
+    for (let i = 0; i < gol.length; i++) {
+      gol[i] = Math.random() < 0.24 ? 1 : 0;
+    }
+  }
+
+  /* ------------------------------------------------------------------
+     6. Paso de la reacción-difusión
+  ------------------------------------------------------------------ */
+  function stepRD() {
+    const f = feed;
+    const k = kill;
+
+    for (let y = 0; y < SH; y++) {
+      const rowN = ((y - 1 + SH) % SH) * SW;
+      const rowC = y * SW;
+      const rowP = ((y + 1) % SH) * SW;
+
+      for (let x = 0; x < SW; x++) {
+        const xl = XM[x];
+        const xr = XP[x];
+        const i  = rowC + x;
+
+        const uc = u[i];
+        const vc = v[i];
+
+        // Laplaciano de 9 puntos
+        const lu =
+          0.20 * (u[rowN + x] + u[rowP + x] + u[rowC + xl] + u[rowC + xr]) +
+          0.05 * (u[rowN + xl] + u[rowN + xr] + u[rowP + xl] + u[rowP + xr]) - uc;
+
+        const lv =
+          0.20 * (v[rowN + x] + v[rowP + x] + v[rowC + xl] + v[rowC + xr]) +
+          0.05 * (v[rowN + xl] + v[rowN + xr] + v[rowP + xl] + v[rowP + xr]) - vc;
+
+        const reaction = uc * vc * vc;
+
+        let nu = uc + Du * lu - reaction + f * (1 - uc);
+        let nv = vc + Dv * lv + reaction - (f + k) * vc;
+
+        u2[i] = nu < 0 ? 0 : (nu > 1 ? 1 : nu);
+        v2[i] = nv < 0 ? 0 : (nv > 1 ? 1 : nv);
+      }
+    }
+
+    // Intercambio de búferes
+    let tmp = u; u = u2; u2 = tmp;
+    tmp = v; v = v2; v2 = tmp;
+  }
+
+  /* ------------------------------------------------------------------
+     7. Paso del autómata celular
+     Reglas B3/S23 más una mutación aleatoria muy baja que evita que
+     el sistema quede congelado en figuras estables.
+  ------------------------------------------------------------------ */
+  function stepGoL() {
+    let pop = 0;
+
+    for (let y = 0; y < GH; y++) {
+      const rowN = ((y - 1 + GH) % GH) * GW;
+      const rowC = y * GW;
+      const rowP = ((y + 1) % GH) * GW;
+
+      for (let x = 0; x < GW; x++) {
+        const xl = GXM[x];
+        const xr = GXP[x];
+
+        const n =
+          gol[rowN + xl] + gol[rowN + x] + gol[rowN + xr] +
+          gol[rowC + xl] +                 gol[rowC + xr] +
+          gol[rowP + xl] + gol[rowP + x] + gol[rowP + xr];
+
+        const alive = gol[rowC + x];
+        let next = alive ? ((n === 2 || n === 3) ? 1 : 0) : (n === 3 ? 1 : 0);
+
+        // Mutación: mantiene el sistema en movimiento
+        if (Math.random() < 0.0004) next ^= 1;
+
+        golNext[rowC + x] = next;
+
+        // Solo los nacimientos siembran química, así el patrón crece por brotes
+        if (next && !alive) seedCell(x, y);
+
+        pop += next;
+      }
+    }
+
+    const tmp = gol; gol = golNext; golNext = tmp;
+
+    // Si la población cae demasiado, se reintroduce variedad
+    if (pop < GW * GH * 0.03) {
+      for (let i = 0; i < gol.length; i++) {
+        if (Math.random() < 0.12) gol[i] = 1;
+      }
+    }
+  }
+
+  /* ------------------------------------------------------------------
+     8. Lienzos: simulación (480x640) + presentación adaptativa
+     La obra se calcula siempre a 480x640 en un lienzo fuera de pantalla.
+     El lienzo visible se redimensiona al tamaño real del marco
+     multiplicado por la densidad de píxeles del dispositivo (DPR),
+     de modo que se ve nítida en móvil, tablet, retina o 4K.
+  ------------------------------------------------------------------ */
+  const stage     = document.getElementById('stage');
+  const artCanvas = document.getElementById('art');
+  const actx      = artCanvas.getContext('2d', { alpha: false });
+
+  const srcCanvas = document.createElement('canvas');
+  srcCanvas.width  = SW;
+  srcCanvas.height = SH;
+  const sctx   = srcCanvas.getContext('2d');
+  const imgData = sctx.createImageData(SW, SH);
+  const pixels  = imgData.data;
+
+  let vw = 0;   // ancho real del lienzo visible (px de dispositivo)
+  let vh = 0;   // alto real
+
+  function resize() {
+    const r   = stage.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2); // tope de 2x para no penalizar
+    const w   = Math.max(1, Math.round(r.width  * dpr));
+    const h   = Math.max(1, Math.round(r.height * dpr));
+
+    if (w === vw && h === vh) return;
+
+    vw = w;
+    vh = h;
+    artCanvas.width  = w;
+    artCanvas.height = h;
+
+    // Redimensionar el lienzo reinicia su estado: reconfiguramos el filtrado
+    actx.imageSmoothingEnabled = true;
+    actx.imageSmoothingQuality = 'high';
+  }
+
+  // Observa cualquier cambio de tamaño del marco (ventana, rotación, zoom…)
+  if (window.ResizeObserver) {
+    new ResizeObserver(resize).observe(stage);
+  } else {
+    window.addEventListener('resize', resize, { passive: true });
+  }
+  window.addEventListener('orientationchange', resize, { passive: true });
+
+  /* ------------------------------------------------------------------
+     9. Dibujado
+  ------------------------------------------------------------------ */
+  function render() {
+    // 9.1 Color por píxel sobre la rejilla de simulación
+    for (let i = 0, p = 0; i < N; i++, p += 4) {
+      let t = v[i] * 3.2;
+      if (t > 1) t = 1;
+      else if (t > 0) t = Math.pow(t, 0.85);
+
+      const li = ((t * 255) | 0) * 3;
+      pixels[p]     = LUT[li];
+      pixels[p + 1] = LUT[li + 1];
+      pixels[p + 2] = LUT[li + 2];
+      pixels[p + 3] = 255;
+    }
+    sctx.putImageData(imgData, 0, 0);
+
+    // 9.2 Reescalado suave al tamaño real del dispositivo
+    if (vw && vh) {
+      actx.drawImage(srcCanvas, 0, 0, vw, vh);
+    }
+  }
+
+  /* ------------------------------------------------------------------
+     10. Bucle principal
+  ------------------------------------------------------------------ */
+  const STEPS_PER_FRAME = 6;
+  let frame = 0;
+
+  function loop() {
+    // Variación lenta de los parámetros: cambia el régimen del patrón
+    kill = KILL_BASE + 0.0026 * Math.sin(frame * 0.0021);
+    feed = FEED_BASE + 0.0012 * Math.sin(frame * 0.0013 + 1.7);
+
+    for (let s = 0; s < STEPS_PER_FRAME; s++) stepRD();
+    if (frame % 3 === 0) stepGoL();
+
+    render();
+    frame++;
+
+    requestAnimationFrame(loop);
+  }
+
+  /* ------------------------------------------------------------------
+     11. Arranque
+  ------------------------------------------------------------------ */
+  initAll();
+  for (let i = 0; i < 40; i++) stepRD();  // pequeños pasos para que no arranque vacío
+
+  resize();        // mide el marco antes del primer dibujo
+  render();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

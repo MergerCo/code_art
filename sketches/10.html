@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mandala Generativo</title>
+<style>
+    html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: #05070d;
+        overflow: hidden;
+        font-family: system-ui, sans-serif;
+    }
+
+    canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+    }
+
+    /* Watermark solicitado */
+    .watermark {
+        position: absolute;
+        left: 50%;
+        bottom: 3.2%;
+        transform: translateX(-50%);
+        color: rgba(255, 255, 255, 0.28);
+        font-size: clamp(12px, 1.9vh, 36px);
+        letter-spacing: 0.04em;
+        pointer-events: none;
+        user-select: none;
+        white-space: nowrap;
+    }
+
+    /* Panel de ayuda responsivo: se adapta al tamaño del canvas */
+    .hint {
+        position: absolute;
+        top: clamp(8px, 2vh, 20px);
+        left: clamp(8px, 2vw, 20px);
+        right: clamp(8px, 2vw, 20px);
+        max-width: 420px;
+        color: rgba(255, 255, 255, 0.35);
+        font-size: clamp(10px, 1.5vh, 14px);
+        line-height: 1.5;
+        pointer-events: none;
+        user-select: none;
+        padding: clamp(6px, 1vh, 12px);
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 6px;
+        backdrop-filter: blur(4px);
+        -webkit-backdrop-filter: blur(4px);
+    }
+
+    /* En pantallas muy pequeñas, ocultar el hint para no estorbar */
+    @media (max-width: 480px) {
+        .hint {
+            font-size: 10px;
+            max-width: 90vw;
+            top: 8px;
+            left: 8px;
+            right: auto;
+            padding: 6px 10px;
+        }
+    }
+</style>
+</head>
+<body>
+
+<canvas id="scene"></canvas>
+
+<div class="hint">
+    Mueve el mouse para deformar · Click para cambiar paleta · Rueda para zoom · Espacio para pausar · ↑↓ cambiar simetría
+</div>
+
+<div class="watermark">@Captura_Casual | 2026</div>
+
+<script>
+/* -----------------------------------------------------------
+   Mandala generativo
+   - Simetría radial con varias capas concéntricas
+   - Formas que respiran con el tiempo (sin/cos)
+   - Interacción con el mouse (deformación radial)
+   - Soporte táctil para dispositivos móviles
+   - Cambio de paleta al hacer click o tap
+   ----------------------------------------------------------- */
+
+const canvas = document.getElementById('scene');
+const ctx = canvas.getContext('2d');
+
+let W = 0, H = 0, CX = 0, CY = 0, DPR = 1;
+
+// Estado global
+const state = {
+    time: 0,
+    paused: false,
+    zoom: 1,
+    mouse: { x: 0, y: 0, nx: 0, ny: 0, active: false },
+    paletteIndex: 0,
+    symmetry: 12,   // número de "pétalos" principales
+    layers: 6       // cantidad de anillos concéntricos
+};
+
+// Paletas de colores (tonos suaves que combinan entre sí)
+const palettes = [
+    ['#ff6b9d', '#feca57', '#48dbfb', '#1dd1a1', '#a29bfe'],
+    ['#ff9a8b', '#ff6a88', '#ff99ac', '#fbc2eb', '#a6c1ee'],
+    ['#30cfd0', '#330867', '#6a11cb', '#2575fc', '#00c9ff'],
+    ['#f78ca0', '#f9748f', '#fd868c', '#fe9a8b', '#f8e9a1'],
+    ['#22c1c3', '#fdbb2d', '#ff512f', '#dd2476', '#7f00ff']
+];
+
+// Ajustar tamaño del canvas al viewport y a la densidad de píxeles
+function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W * DPR;
+    canvas.height = H * DPR;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    CX = W / 2;
+    CY = H / 2;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Utilidad: convertir hex a rgba
+function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+// Interpola dos colores de la paleta según un valor t (0..1)
+function samplePalette(t, alpha) {
+    const pal = palettes[state.paletteIndex];
+    const pos = ((t % 1) + 1) % 1 * (pal.length - 1);
+    const i = Math.floor(pos);
+    const f = pos - i;
+    const a = hexToRgb(pal[i]);
+    const b = hexToRgb(pal[(i + 1) % pal.length]);
+    const r = Math.round(a.r + (b.r - a.r) * f);
+    const g = Math.round(a.g + (b.g - a.g) * f);
+    const bl = Math.round(a.b + (b.b - a.b) * f);
+    return `rgba(${r},${g},${bl},${alpha})`;
+}
+
+// Dibuja un "pétalo" como una forma curva entre dos ángulos
+function drawPetal(angle, radius, thickness, color, alpha) {
+    ctx.save();
+    ctx.translate(CX, CY);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    // Curva tipo hoja usando curvas cuadráticas
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(radius * 0.5, -thickness, radius, 0);
+    ctx.quadraticCurveTo(radius * 0.5, thickness, 0, 0);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.globalAlpha = alpha;
+    ctx.fill();
+    ctx.restore();
+}
+
+// Dibuja un anillo de elementos con simetría radial
+function drawRing(layerIndex, radius, count, size, colorFn, alphaBase) {
+    const step = (Math.PI * 2) / count;
+    // Ligero offset rotatorio que varía con el tiempo para dar vida
+    const rotOffset = state.time * 0.0004 * (layerIndex % 2 === 0 ? 1 : -1);
+
+    for (let i = 0; i < count; i++) {
+        const angle = i * step + rotOffset;
+
+        // Deformación basada en la posición del mouse (efecto sutil)
+        let r = radius;
+        if (state.mouse.active) {
+            const dx = state.mouse.nx; // -1..1
+            const dy = state.mouse.ny;
+            // Proyectamos el ángulo contra la dirección del mouse
+            const proj = Math.cos(angle) * dx + Math.sin(angle) * dy;
+            r += proj * 30 * (1 - layerIndex / state.layers);
+        }
+
+        // Tamaño pulsante
+        const pulse = 1 + Math.sin(state.time * 0.002 + layerIndex + i * 0.3) * 0.15;
+        const s = size * pulse;
+
+        const color = colorFn(i / count, layerIndex / state.layers);
+        drawPetal(angle, r, s, color, alphaBase);
+    }
+}
+
+// Dibuja líneas radiales finas que conectan el centro con el exterior
+function drawRadialLines(count, innerR, outerR, color, alpha) {
+    ctx.save();
+    ctx.translate(CX, CY);
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = 1;
+    const step = (Math.PI * 2) / count;
+    for (let i = 0; i < count; i++) {
+        const a = i * step + state.time * 0.0002;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * innerR, Math.sin(a) * innerR);
+        ctx.lineTo(Math.cos(a) * outerR, Math.sin(a) * outerR);
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+
+// Dibuja puntos a lo largo de un círculo
+function drawDots(radius, count, size, color, alpha) {
+    ctx.save();
+    ctx.translate(CX, CY);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = alpha;
+    const step = (Math.PI * 2) / count;
+    for (let i = 0; i < count; i++) {
+        const a = i * step - state.time * 0.0003;
+        const x = Math.cos(a) * radius;
+        const y = Math.sin(a) * radius;
+        ctx.beginPath();
+        ctx.arc(x, y, size, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.restore();
+}
+
+// Bucle principal
+function frame() {
+    if (!state.paused) state.time += 16;
+
+    // Fondo con leve rastro para crear estelas suaves
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = 'rgba(5, 7, 13, 0.35)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    // Aplicamos zoom desde el centro
+    ctx.translate(CX, CY);
+    ctx.scale(state.zoom, state.zoom);
+    ctx.translate(-CX, -CY);
+
+    const baseRadius = Math.min(W, H) * 0.38;
+
+    // Capa 1: líneas radiales sutiles de fondo
+    drawRadialLines(state.symmetry * 4, baseRadius * 0.1, baseRadius * 1.05,
+        samplePalette(0.2, 1), 0.08);
+
+    // Capas concéntricas de pétalos (de afuera hacia adentro)
+    for (let i = state.layers - 1; i >= 0; i--) {
+        const t = i / state.layers;
+        const radius = baseRadius * (0.25 + t * 0.75);
+        const count = state.symmetry * (i % 2 === 0 ? 1 : 2);
+        const size = 14 + (state.layers - i) * 4;
+        const alpha = 0.18 + (1 - t) * 0.25;
+
+        const colorFn = (u, v) => samplePalette(u * 0.6 + v * 0.4 + state.time * 0.0001, 1);
+        drawRing(i, radius, count, size, colorFn, alpha);
+    }
+
+    // Anillos de puntos decorativos
+    for (let i = 0; i < 3; i++) {
+        const r = baseRadius * (0.3 + i * 0.3);
+        const n = state.symmetry * (i + 2);
+        drawDots(r, n, 1.5 + i * 0.5,
+            samplePalette(0.3 + i * 0.2, 1), 0.5);
+    }
+
+    // Núcleo central pulsante
+    const coreR = 18 + Math.sin(state.time * 0.003) * 6;
+    const grad = ctx.createRadialGradient(CX, CY, 0, CX, CY, coreR * 3);
+    grad.addColorStop(0, samplePalette(0.5, 0.9));
+    grad.addColorStop(0.4, samplePalette(0.7, 0.4));
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(CX, CY, coreR * 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+
+    requestAnimationFrame(frame);
+}
+
+// Eventos de interacción con mouse
+window.addEventListener('mousemove', (e) => {
+    state.mouse.x = e.clientX;
+    state.mouse.y = e.clientY;
+    state.mouse.nx = (e.clientX - CX) / (W / 2);
+    state.mouse.ny = (e.clientY - CY) / (H / 2);
+    state.mouse.active = true;
+});
+window.addEventListener('mouseleave', () => { state.mouse.active = false; });
+
+// Soporte táctil para dispositivos móviles
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const touch = e.touches[0];
+    state.mouse.x = touch.clientX;
+    state.mouse.y = touch.clientY;
+    state.mouse.nx = (touch.clientX - CX) / (W / 2);
+    state.mouse.ny = (touch.clientY - CY) / (H / 2);
+    state.mouse.active = true;
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    const touch = e.touches[0];
+    state.mouse.x = touch.clientX;
+    state.mouse.y = touch.clientY;
+    state.mouse.nx = (touch.clientX - CX) / (W / 2);
+    state.mouse.ny = (touch.clientY - CY) / (H / 2);
+}, { passive: false });
+
+canvas.addEventListener('touchend', () => {
+    state.mouse.active = false;
+});
+
+// Click o tap para cambiar paleta
+window.addEventListener('click', () => {
+    state.paletteIndex = (state.paletteIndex + 1) % palettes.length;
+});
+
+// Zoom con rueda del mouse
+window.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = -Math.sign(e.deltaY) * 0.05;
+    state.zoom = Math.max(0.4, Math.min(2.2, state.zoom + delta));
+}, { passive: false });
+
+// Controles de teclado
+window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') {
+        state.paused = !state.paused;
+        e.preventDefault();
+    } else if (e.code === 'ArrowUp') {
+        state.symmetry = Math.min(32, state.symmetry + 1);
+    } else if (e.code === 'ArrowDown') {
+        state.symmetry = Math.max(3, state.symmetry - 1);
+    } else if (e.code === 'KeyR') {
+        // Reset suave
+        state.zoom = 1;
+        state.time = 0;
+    }
+});
+
+// Iniciar animación
+frame();
+</script>
+
+</body>
+</html>

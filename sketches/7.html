@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Campo de flujo animado — obra generativa</title>
+<style>
+  :root { color-scheme: dark; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #08090a;
+    overflow: hidden;
+    overscroll-behavior: none;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* El lienzo ocupa toda la ventana. El tamaño real se ajusta desde el
+     script según la densidad de píxeles del dispositivo. */
+  .frame {
+    position: fixed;
+    inset: 0;
+  }
+
+  .frame canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* Firma sobre la obra. No captura clics ni gestos. */
+  .watermark {
+    position: fixed;
+    left: 50%;
+    bottom: calc(3.2% + env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%);
+    color: rgba(255, 255, 255, 0.28);
+    font-size: clamp(11px, 2vh, 30px);
+    letter-spacing: 0.04em;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+
+  <div class="frame">
+    <canvas id="art"></canvas>
+  </div>
+
+  <div class="watermark">@Captura_Casual | 2026</div>
+
+<script>
+(function () {
+  'use strict';
+
+  const canvas = document.getElementById('art');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  // Tamaño visible del lienzo, en píxeles CSS.
+  const vista = { ancho: 0, alto: 0, dpr: 1 };
+
+  // Resolución de referencia con la que se calibraron grosores y velocidades.
+  const ANCHO_REF = 1200;
+
+  let semilla = 1;
+  let obra = null;
+  let tiempoInicio = performance.now();
+
+  /* ------------------------------------------------------------------ */
+  /* Azar reproducible                                                   */
+  /* ------------------------------------------------------------------ */
+
+  // Devuelve números entre 0 y 1 a partir de una semilla.
+  // Con la misma semilla la secuencia es siempre idéntica.
+  function mulberry32(a) {
+    return function () {
+      a |= 0;
+      a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Ruido suave                                                         */
+  /* ------------------------------------------------------------------ */
+
+  // Ruido de valor: toma números al azar de una rejilla y los interpola
+  // con una curva suave. Sumando varias octavas (fbm) se obtiene detalle
+  // a distintas escalas, que es lo que da forma al campo de dirección.
+  function crearRuido(semilla) {
+    const r = mulberry32(semilla);
+    const p = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) p[i] = i;
+    for (let i = 255; i > 0; i--) {
+      const j = (r() * (i + 1)) | 0;
+      const t = p[i]; p[i] = p[j]; p[j] = t;
+    }
+    const perm = new Uint8Array(512);
+    for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+
+    const hash = (x, y) => perm[(perm[x & 255] + (y & 255)) & 255] / 255;
+    const suavizar = t => t * t * (3 - 2 * t);
+
+    function valor(x, y) {
+      const xi = Math.floor(x), yi = Math.floor(y);
+      const xf = x - xi, yf = y - yi;
+      const u = suavizar(xf), v = suavizar(yf);
+      const a = hash(xi, yi), b = hash(xi + 1, yi);
+      const c = hash(xi, yi + 1), d = hash(xi + 1, yi + 1);
+      const ab = a + (b - a) * u;
+      const cd = c + (d - c) * u;
+      return ab + (cd - ab) * v;
+    }
+
+    function fbm(x, y, oct = 4) {
+      let suma = 0, amp = 0.5, frec = 1, norm = 0;
+      for (let i = 0; i < oct; i++) {
+        suma += valor(x * frec, y * frec) * amp;
+        norm += amp;
+        amp *= 0.5;
+        frec *= 2;
+      }
+      return suma / norm;
+    }
+
+    return { fbm };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Paleta                                                              */
+  /* ------------------------------------------------------------------ */
+
+  const PALETA = [
+    { c: '#f2dcae', w: 0.24 },
+    { c: '#d89a45', w: 0.22 },
+    { c: '#b34a26', w: 0.15 },
+    { c: '#4f9a92', w: 0.13 },
+    { c: '#a9c0e0', w: 0.10 },
+    { c: '#f6f1e4', w: 0.16 }
+  ];
+  const PESO_TOTAL = PALETA.reduce((s, p) => s + p.w, 0);
+
+  // Elige un color de la paleta respetando los pesos indicados.
+  function elegirColor(r) {
+    let t = r * PESO_TOTAL;
+    for (const p of PALETA) {
+      t -= p.w;
+      if (t <= 0) return p.c;
+    }
+    return PALETA[0].c;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Fondo                                                               */
+  /* ------------------------------------------------------------------ */
+
+  // Manchas de color difusas sobre un fondo oscuro. Se dibujan una sola
+  // vez en un lienzo aparte y luego se copian en cada fotograma, así el
+  // coste por fotograma se reduce a pegar una imagen.
+  function crearFondo(ancho, alto) {
+    const fondo = document.createElement('canvas');
+    fondo.width = Math.max(1, Math.round(ancho));
+    fondo.height = Math.max(1, Math.round(alto));
+    const fctx = fondo.getContext('2d');
+
+    fctx.fillStyle = '#0a0d11';
+    fctx.fillRect(0, 0, fondo.width, fondo.height);
+
+    // Cada mancha se define en coordenadas normalizadas, de modo que su
+    // posición no dependa de la proporción de la pantalla.
+    const manchas = [
+      ['#16323c', 0.22, 0.26, 0.80],
+      ['#2e1a10', 0.80, 0.74, 0.75],
+      ['#1a1530', 0.28, 0.82, 0.68],
+      ['#2b2411', 0.74, 0.20, 0.60]
+    ];
+
+    fctx.globalCompositeOperation = 'lighter';
+
+    for (const [color, ux, uy, radio] of manchas) {
+      const cx = ux * fondo.width;
+      const cy = uy * fondo.height;
+      // El radio se calcula sobre la diagonal para que la mancha cubra
+      // una porción parecida del lienzo en cualquier proporción.
+      const r = radio * Math.hypot(fondo.width, fondo.height) * 0.72;
+      const g = fctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      g.addColorStop(0, color);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      fctx.globalAlpha = 0.45;
+      fctx.fillStyle = g;
+      fctx.fillRect(0, 0, fondo.width, fondo.height);
+    }
+
+    fctx.globalAlpha = 1;
+    fctx.globalCompositeOperation = 'source-over';
+
+    return fondo;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Generación de la obra                                               */
+  /* ------------------------------------------------------------------ */
+
+  // Crea el campo de dirección y traza las líneas de flujo.
+  // Los puntos se guardan en coordenadas normalizadas (0..1), de modo que
+  // la misma obra sirve para cualquier tamaño de pantalla sin recalcularse.
+  function generarObra(semilla, anchoFondo, altoFondo, densidad) {
+    const rand = mulberry32(semilla >>> 0);
+    const ruido = crearRuido(semilla >>> 0);
+
+    const fondo = crearFondo(anchoFondo, altoFondo);
+
+    // Rejilla donde se guarda el valor de ruido de cada celda.
+    const GW = 200;
+    const GH = 250;
+    const campo = new Float32Array((GW + 1) * (GH + 1));
+    const escala = 3.1;
+
+    for (let j = 0; j <= GH; j++) {
+      for (let i = 0; i <= GW; i++) {
+        const u = i / GW;
+        const v = j / GH;
+        campo[j * (GW + 1) + i] = ruido.fbm(u * escala + 13.7, v * escala + 5.2, 4);
+      }
+    }
+
+    // Lectura del campo con interpolación bilineal.
+    function muestrear(u, v) {
+      const fx = u * GW;
+      const fy = v * GH;
+      const i = Math.min(GW - 1, Math.max(0, Math.floor(fx)));
+      const j = Math.min(GH - 1, Math.max(0, Math.floor(fy)));
+      const tx = fx - i;
+      const ty = fy - j;
+      const idx = j * (GW + 1) + i;
+      const a = campo[idx];
+      const b = campo[idx + 1];
+      const c = campo[idx + GW + 1];
+      const d = campo[idx + GW + 2];
+      const ab = a + (b - a) * tx;
+      const cd = c + (d - c) * tx;
+      return ab + (cd - ab) * ty;
+    }
+
+    // Punto alrededor del cual el campo gira ligeramente.
+    const centroX = 0.34 + rand() * 0.32;
+    const centroY = 0.34 + rand() * 0.32;
+    const radioInfluencia = 0.44;
+
+    // Ángulo del campo en un punto, en radianes.
+    function anguloEn(x, y) {
+      const n = muestrear(x, y);
+      let a = n * Math.PI * 4.4;
+      const dx = x - centroX;
+      const dy = y - centroY;
+      const d2 = dx * dx + dy * dy;
+      const infl = Math.exp(-d2 / (2 * radioInfluencia * radioInfluencia));
+      a += Math.atan2(dy, dx) * 0.8 * infl;
+      return a;
+    }
+
+    // La cantidad de líneas se ajusta al área visible: menos en pantallas
+    // pequeñas para no saturar el dibujo ni cargar el procesador.
+    const cantidad = Math.round(Math.min(1400, Math.max(350, 1200 * densidad)));
+
+    const lineas = [];
+
+    for (let k = 0; k < cantidad; k++) {
+      let x = rand();
+      let y = rand();
+      const pasos = 100 + ((rand() * 200) | 0);
+      const paso = 0.002 + rand() * 0.003;
+      const puntos = [];
+
+      // Se avanza siguiendo el ángulo del campo hasta salir del lienzo.
+      for (let s = 0; s < pasos; s++) {
+        const a = anguloEn(x, y);
+        x += Math.cos(a) * paso;
+        y += Math.sin(a) * paso;
+        if (x < 0 || x > 1 || y < 0 || y > 1) break;
+        puntos.push({ x, y });
+      }
+
+      if (puntos.length < 2) continue;
+
+      lineas.push({
+        puntos,
+        color: elegirColor(rand()),
+        grosor: 1.5 + rand() * 3,
+        alfa: 0.05 + rand() * 0.1,
+        velocidad: 0.1 + rand() * 0.4,
+        fase: rand() * Math.PI * 2
+      });
+    }
+
+    return { fondo, lineas };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Dibujo                                                              */
+  /* ------------------------------------------------------------------ */
+
+  function dibujarLineas(ctx, w, h, lineas, tiempo) {
+    // El grosor se ajusta al ancho visible para que el trazo se vea
+    // parecido en un móvil y en un monitor grande.
+    const escalaTrazo = w / ANCHO_REF;
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    for (const linea of lineas) {
+      const total = linea.puntos.length;
+      if (total < 2) continue;
+
+      // Desplazamiento a lo largo de la línea según el tiempo. El tramo
+      // visible recorre la línea entera y da la vuelta al llegar al final,
+      // que es lo que produce el movimiento continuo.
+      const offset = (tiempo * linea.velocidad + linea.fase) % 1;
+      const inicio = Math.floor(offset * total);
+      const ventana = Math.max(3, Math.floor(total * 0.15));
+
+      ctx.beginPath();
+      let primero = true;
+      for (let i = 0; i < ventana; i++) {
+        const idx = (inicio + i) % total;
+        const p = linea.puntos[idx];
+        const px = p.x * w;
+        const py = p.y * h;
+        if (primero) {
+          ctx.moveTo(px, py);
+          primero = false;
+        } else {
+          ctx.lineTo(px, py);
+        }
+      }
+
+      ctx.strokeStyle = linea.color;
+      ctx.globalAlpha = linea.alfa;
+      ctx.lineWidth = linea.grosor * escalaTrazo;
+      ctx.stroke();
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function renderFrame(ctx, w, h, obra, tiempo) {
+    // El fondo cubre todo el lienzo, así que no hace falta limpiarlo antes.
+    ctx.drawImage(obra.fondo, 0, 0, w, h);
+    dibujarLineas(ctx, w, h, obra.lineas, tiempo);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Bucle de animación                                                  */
+  /* ------------------------------------------------------------------ */
+
+  function animar() {
+    const tiempo = (performance.now() - tiempoInicio) / 1000;
+    if (obra) renderFrame(ctx, vista.ancho, vista.alto, obra, tiempo);
+    requestAnimationFrame(animar);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Tamaño del lienzo y arranque                                        */
+  /* ------------------------------------------------------------------ */
+
+  function ajustarTamano() {
+    // Se limita la densidad de píxeles a 2 para no disparar el trabajo de
+    // relleno en pantallas de móvil con densidad muy alta.
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const ancho = Math.max(1, canvas.clientWidth || window.innerWidth);
+    const alto = Math.max(1, canvas.clientHeight || window.innerHeight);
+
+    if (ancho === vista.ancho && alto === vista.alto && dpr === vista.dpr) return;
+
+    vista.ancho = ancho;
+    vista.alto = alto;
+    vista.dpr = dpr;
+
+    // El lienzo trabaja en píxeles reales y el contexto se escala, de modo
+    // que el resto del código puede seguir usando píxeles CSS.
+    canvas.width = Math.round(ancho * dpr);
+    canvas.height = Math.round(alto * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // El fondo se rehace al nuevo tamaño para que no se vea borroso al
+    // cambiar de pantalla o de orientación.
+    if (obra) obra.fondo = crearFondo(canvas.width, canvas.height);
+  }
+
+  function iniciar(nuevaSemilla) {
+    ajustarTamano();
+    semilla = nuevaSemilla >>> 0;
+    // Densidad relativa a la resolución de referencia 1200 × 1500.
+    const densidad = Math.sqrt((vista.ancho * vista.alto) / (1200 * 1500));
+    obra = generarObra(semilla, canvas.width, canvas.height, densidad);
+    tiempoInicio = performance.now();
+  }
+
+  window.addEventListener('resize', ajustarTamano);
+  window.addEventListener('orientationchange', ajustarTamano);
+
+  ajustarTamano();
+  iniciar((Math.random() * 1e9) | 0);
+  animar();
+})();
+</script>
+
+</body>
+</html>
