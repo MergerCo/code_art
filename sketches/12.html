@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Organismo Nebular</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #05060c;
+    overflow: hidden;
+  }
+
+  body {
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  #stage {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    background: radial-gradient(circle at 50% 50%, #0b0a1e 0%, #05060c 70%);
+  }
+
+  canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  .watermark {
+    position: absolute;
+    left: 50%;
+    bottom: 3.2%;
+    transform: translateX(-50%);
+    color: rgba(255, 255, 255, 0.28);
+    font-size: clamp(12px, 1.9vh, 36px);
+    letter-spacing: 0.04em;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <canvas id="fx"></canvas>
+  <div class="watermark">@Captura_Casual | 2026</div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  const stage = document.getElementById('stage');
+  const glCanvas = document.getElementById('gl');
+  const fxCanvas = document.getElementById('fx');
+  const fx = fxCanvas.getContext('2d');
+
+  let W = 0;
+  let H = 0;
+  let fxScale = 1;
+  let glScale = 1;
+
+  // ---------------------------------------------------------------
+  // Contexto WebGL
+  // ---------------------------------------------------------------
+  const gl = glCanvas.getContext('webgl', {
+    alpha: false,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    premultipliedAlpha: false,
+    powerPreference: 'high-performance'
+  }) || glCanvas.getContext('experimental-webgl');
+
+  const VERT_SRC = [
+    'attribute vec2 aPos;',
+    'void main() {',
+    '  gl_Position = vec4(aPos, 0.0, 1.0);',
+    '}'
+  ].join('\n');
+
+  const FRAG_SRC = [
+    'precision highp float;',
+    '',
+    'uniform vec2 uRes;',
+    'uniform float uTime;',
+    'uniform vec2 uMouse;',
+    '',
+    'float hash(vec2 p) {',
+    '  p = fract(p * vec2(127.1, 311.7));',
+    '  p += dot(p, p + 34.56);',
+    '  return fract(p.x * p.y);',
+    '}',
+    '',
+    'float noise(vec2 p) {',
+    '  vec2 i = floor(p);',
+    '  vec2 f = fract(p);',
+    '  vec2 u = f * f * (3.0 - 2.0 * f);',
+    '  float a = hash(i);',
+    '  float b = hash(i + vec2(1.0, 0.0));',
+    '  float c = hash(i + vec2(0.0, 1.0));',
+    '  float d = hash(i + vec2(1.0, 1.0));',
+    '  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);',
+    '}',
+    '',
+    'float fbm(vec2 p) {',
+    '  float v = 0.0;',
+    '  float a = 0.5;',
+    '  mat2 rot = mat2(0.80, 0.60, -0.60, 0.80);',
+    '  for (int i = 0; i < 5; i++) {',
+    '    v += a * noise(p);',
+    '    p = rot * p * 2.03;',
+    '    a *= 0.5;',
+    '  }',
+    '  return v;',
+    '}',
+    '',
+    'void main() {',
+    '  vec2 res = uRes;',
+    '  float mn = min(res.x, res.y);',
+    '  vec2 uv = (gl_FragCoord.xy - 0.5 * res) / mn;',
+    '  vec2 mo = (uMouse - 0.5 * res) / mn;',
+    '',
+    '  float t = uTime * 0.06;',
+    '',
+    '  // Deformacion de dominio: produce el aspecto de fluido abstracto',
+    '  vec2 q = vec2(',
+    '    fbm(uv * 1.6 + t),',
+    '    fbm(uv * 1.6 + vec2(5.2, 1.3) - t)',
+    '  );',
+    '  vec2 r = vec2(',
+    '    fbm(uv * 2.1 + 3.5 * q + vec2(1.7, 9.2) + t * 1.4),',
+    '    fbm(uv * 2.1 + 3.5 * q + vec2(8.3, 2.8) - t * 1.2)',
+    '  );',
+    '  float f = fbm(uv * 1.9 + 2.8 * r);',
+    '',
+    '  // Onda que se abre alrededor del puntero',
+    '  float d = length(uv - mo);',
+    '  float ripple = exp(-d * 2.6) * sin(d * 16.0 - uTime * 2.2);',
+    '  f += ripple * 0.22;',
+    '',
+    '  // Brazos en espiral',
+    '  float ang = atan(uv.y, uv.x);',
+    '  float rad = length(uv);',
+    '  float spiral = sin(ang * 2.0 + rad * 7.0 - uTime * 0.35);',
+    '  float arms = smoothstep(0.15, 1.0, spiral * 0.5 + 0.5) * exp(-rad * 1.5);',
+    '',
+    '  // Paleta',
+    '  vec3 base   = vec3(0.015, 0.020, 0.060);',
+    '  vec3 violet = vec3(0.320, 0.060, 0.520);',
+    '  vec3 cyan   = vec3(0.040, 0.520, 0.720);',
+    '  vec3 warm   = vec3(1.000, 0.520, 0.160);',
+    '',
+    '  vec3 col = mix(base, violet, smoothstep(0.10, 0.95, f));',
+    '  col = mix(col, cyan, smoothstep(0.30, 1.10, r.x * 1.15 + arms * 0.40));',
+    '  col += warm * pow(smoothstep(0.45, 1.0, f * 0.75 + arms * 0.55), 3.0) * 0.85;',
+    '  col += vec3(0.45, 0.65, 1.00) * arms * 0.45;',
+    '',
+    '  // Nucleo brillante',
+    '  col += vec3(1.00, 0.86, 0.65) * exp(-rad * 8.0) * 0.90;',
+    '  col += vec3(0.60, 0.80, 1.00) * exp(-d * 4.0) * 0.12;',
+    '',
+    '  // Estrellas con parpadeo',
+    '  vec2 sg = floor(uv * 130.0);',
+    '  vec2 sc = fract(uv * 130.0) - 0.5;',
+    '  float sh = hash(sg);',
+    '  float tw = 0.6 + 0.4 * sin(uTime * 3.0 + sh * 40.0);',
+    '  float star = smoothstep(0.42, 0.0, length(sc)) * step(0.988, sh) * 2.2 * tw;',
+    '  col += vec3(0.85, 0.92, 1.00) * star;',
+    '',
+    '  // Viñeta',
+    '  float vig = smoothstep(1.50, 0.35, length(uv));',
+    '  col *= 0.55 + 0.45 * vig;',
+    '',
+    '  // Exposicion y compresion de tonos',
+    '  col *= 1.10;',
+    '  col = col / (col + vec3(0.85));',
+    '  col = pow(col, vec3(0.85));',
+    '',
+    '  // Ruido leve para evitar bandas de color',
+    '  col += (hash(gl_FragCoord.xy * 0.71) - 0.5) / 255.0;',
+    '',
+    '  gl_FragColor = vec4(col, 1.0);',
+    '}'
+  ].join('\n');
+
+  let program = null;
+  let uResLoc = null;
+  let uTimeLoc = null;
+  let uMouseLoc = null;
+
+  function compileShader(type, src) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, src);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      console.error('Error al compilar el shader:', gl.getShaderInfoLog(shader));
+      gl.deleteShader(shader);
+      return null;
+    }
+    return shader;
+  }
+
+  function initGL() {
+    const vs = compileShader(gl.VERTEX_SHADER, VERT_SRC);
+    const fs = compileShader(gl.FRAGMENT_SHADER, FRAG_SRC);
+    if (!vs || !fs) return false;
+
+    program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error('Error al enlazar el programa:', gl.getProgramInfoLog(program));
+      return false;
+    }
+
+    gl.useProgram(program);
+
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+      gl.STATIC_DRAW
+    );
+
+    const aPos = gl.getAttribLocation(program, 'aPos');
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+    uResLoc = gl.getUniformLocation(program, 'uRes');
+    uTimeLoc = gl.getUniformLocation(program, 'uTime');
+    uMouseLoc = gl.getUniformLocation(program, 'uMouse');
+
+    return true;
+  }
+
+  const glOk = !!gl && initGL();
+
+  if (!glOk) {
+    // Sin WebGL se mantiene el fondo degradado definido en CSS.
+    glCanvas.style.display = 'none';
+  }
+
+  // ---------------------------------------------------------------
+  // Escala de resolucion
+  // ---------------------------------------------------------------
+  function computeGLScale(w, h) {
+    let s = Math.min(window.devicePixelRatio || 1, 1.5);
+    const maxPixels = 2400000;
+    const total = w * h * s * s;
+    if (total > maxPixels) {
+      s *= Math.sqrt(maxPixels / total);
+    }
+    return Math.max(s, 0.6);
+  }
+
+  // ---------------------------------------------------------------
+  // Puntero (raton o dedo) con deriva automatica cuando no hay actividad
+  // ---------------------------------------------------------------
+  const pointer = { x: 0, y: 0, tx: 0, ty: 0, lastMove: -1e9, ready: false };
+
+  function updatePointer(now) {
+    if (now - pointer.lastMove > 3500) {
+      const t = now * 0.00035;
+      pointer.tx = W * (0.5 + 0.32 * Math.sin(t * 1.1));
+      pointer.ty = H * (0.5 + 0.28 * Math.cos(t * 1.7));
+    }
+    pointer.x += (pointer.tx - pointer.x) * 0.06;
+    pointer.y += (pointer.ty - pointer.y) * 0.06;
+  }
+
+  window.addEventListener('pointermove', function (e) {
+    pointer.tx = e.clientX;
+    pointer.ty = e.clientY;
+    pointer.lastMove = performance.now();
+    if (!pointer.ready) {
+      pointer.x = e.clientX;
+      pointer.y = e.clientY;
+      pointer.ready = true;
+    }
+  }, { passive: true });
+
+  window.addEventListener('pointerdown', function (e) {
+    pointer.tx = e.clientX;
+    pointer.ty = e.clientY;
+    pointer.lastMove = performance.now();
+  }, { passive: true });
+
+  // ---------------------------------------------------------------
+  // Organismos artificiales sobre canvas 2D
+  // ---------------------------------------------------------------
+  const spriteCache = [];
+
+  function makeSprite(r, g, b) {
+    const size = 64;
+    const c = document.createElement('canvas');
+    c.width = size;
+    c.height = size;
+    const g2 = c.getContext('2d');
+    const grd = g2.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    grd.addColorStop(0.00, 'rgba(' + r + ',' + g + ',' + b + ',1)');
+    grd.addColorStop(0.25, 'rgba(' + r + ',' + g + ',' + b + ',0.45)');
+    grd.addColorStop(1.00, 'rgba(' + r + ',' + g + ',' + b + ',0)');
+    g2.fillStyle = grd;
+    g2.fillRect(0, 0, size, size);
+    return c;
+  }
+
+  spriteCache.push(makeSprite(120, 220, 255));
+  spriteCache.push(makeSprite(180, 120, 255));
+  spriteCache.push(makeSprite(255, 170, 90));
+  spriteCache.push(makeSprite(90, 255, 220));
+
+  const particles = [];
+  const LINK_DIST = 132;
+
+  function initParticles() {
+    particles.length = 0;
+    const target = Math.round((W * H) / 22000);
+    const count = Math.max(34, Math.min(88, target));
+    for (let i = 0; i < count; i++) {
+      particles.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        vx: (Math.random() - 0.5) * 14,
+        vy: (Math.random() - 0.5) * 14,
+        r: 1.6 + Math.random() * 3.4,
+        ph: Math.random() * Math.PI * 2,
+        sp: 0.25 + Math.random() * 0.6,
+        sprite: spriteCache[i % spriteCache.length]
+      });
+    }
+  }
+
+  function updateParticles(dt, time) {
+    const damp = Math.pow(0.985, dt * 60);
+    const px = pointer.x;
+    const py = pointer.y;
+
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+
+      // Corriente interna suave
+      const flow = Math.sin(p.x * 0.004 + time * 0.35) + Math.cos(p.y * 0.004 - time * 0.25);
+      p.vx += Math.cos(flow * 2.0) * 14 * dt;
+      p.vy += Math.sin(flow * 2.0) * 14 * dt;
+
+      // Giro alrededor del puntero
+      const dx = px - p.x;
+      const dy = py - p.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) + 0.001;
+      const pull = Math.min(70, 5200 / (dist + 150));
+      const ux = dx / dist;
+      const uy = dy / dist;
+      p.vx += (ux * 0.55 - uy * 0.85) * pull * dt;
+      p.vy += (uy * 0.55 + ux * 0.85) * pull * dt;
+
+      p.vx *= damp;
+      p.vy *= damp;
+
+      const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+      const maxSpeed = 90;
+      if (speed > maxSpeed) {
+        p.vx = (p.vx / speed) * maxSpeed;
+        p.vy = (p.vy / speed) * maxSpeed;
+      }
+
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.ph += p.sp * dt;
+
+      // Reaparicion por los bordes
+      if (p.x < -60) p.x = W + 60;
+      if (p.x > W + 60) p.x = -60;
+      if (p.y < -60) p.y = H + 60;
+      if (p.y > H + 60) p.y = -60;
+    }
+  }
+
+  function drawOverlay() {
+    fx.setTransform(fxScale, 0, 0, fxScale, 0, 0);
+    fx.clearRect(0, 0, W, H);
+    fx.globalCompositeOperation = 'lighter';
+
+    // Red de conexiones entre organismos cercanos
+    fx.lineWidth = 1;
+    for (let i = 0; i < particles.length; i++) {
+      const a = particles[i];
+      for (let j = i + 1; j < particles.length; j++) {
+        const b = particles[j];
+        const dx = a.x - b.x;
+        if (dx > LINK_DIST || dx < -LINK_DIST) continue;
+        const dy = a.y - b.y;
+        if (dy > LINK_DIST || dy < -LINK_DIST) continue;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > LINK_DIST * LINK_DIST) continue;
+        const alpha = (1 - Math.sqrt(d2) / LINK_DIST) * 0.14;
+        fx.strokeStyle = 'rgba(150, 200, 255,' + alpha.toFixed(3) + ')';
+        fx.beginPath();
+        fx.moveTo(a.x, a.y);
+        fx.lineTo(b.x, b.y);
+        fx.stroke();
+      }
+    }
+
+    // Nucleos luminosos
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      const pulse = 0.75 + 0.25 * Math.sin(p.ph * 2.0);
+      const size = p.r * 9 * pulse;
+      fx.globalAlpha = 0.55 * pulse;
+      fx.drawImage(p.sprite, p.x - size / 2, p.y - size / 2, size, size);
+    }
+
+    fx.globalAlpha = 1;
+    fx.globalCompositeOperation = 'source-over';
+  }
+
+  // ---------------------------------------------------------------
+  // Redimensionado
+  // ---------------------------------------------------------------
+  function resize() {
+    const prevW = W || window.innerWidth;
+    const prevH = H || window.innerHeight;
+
+    W = window.innerWidth;
+    H = window.innerHeight;
+
+    fxScale = Math.min(window.devicePixelRatio || 1, 2);
+    fxCanvas.width = Math.max(1, Math.round(W * fxScale));
+    fxCanvas.height = Math.max(1, Math.round(H * fxScale));
+
+    if (glOk) {
+      glScale = computeGLScale(W, H);
+      glCanvas.width = Math.max(1, Math.round(W * glScale));
+      glCanvas.height = Math.max(1, Math.round(H * glScale));
+      gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+    }
+
+    if (particles.length === 0) {
+      pointer.x = W / 2;
+      pointer.y = H / 2;
+      pointer.tx = W / 2;
+      pointer.ty = H / 2;
+      initParticles();
+    } else {
+      const sx = W / prevW;
+      const sy = H / prevH;
+      for (let i = 0; i < particles.length; i++) {
+        particles[i].x *= sx;
+        particles[i].y *= sy;
+      }
+    }
+  }
+
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', function () {
+    setTimeout(resize, 180);
+  });
+
+  // ---------------------------------------------------------------
+  // Bucle principal
+  // ---------------------------------------------------------------
+  const startTime = performance.now();
+  let lastTime = startTime;
+
+  function frame(now) {
+    let dt = (now - lastTime) / 1000;
+    lastTime = now;
+    if (dt > 0.05) dt = 0.05;
+    if (dt < 0) dt = 0;
+
+    const time = (now - startTime) / 1000;
+
+    updatePointer(now);
+    updateParticles(dt, time);
+    drawOverlay();
+
+    if (glOk) {
+      gl.uniform2f(uResLoc, glCanvas.width, glCanvas.height);
+      gl.uniform1f(uTimeLoc, time);
+      gl.uniform2f(uMouseLoc, pointer.x * glScale, (H - pointer.y) * glScale);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#05030b" />
+  <meta name="description" content="Arte generativo interactivo: galaxia, ondas, fuego, humo y organismos artificiales." />
+  <title>Captura Casual · Arte Generativo 2026</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #05030b;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    body {
+      position: relative;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    #art {
+      position: fixed;
+      inset: 0;
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: var(--bg);
+      touch-action: none;
+    }
+
+    .watermark {
+      position: absolute;
+      left: 50%;
+      bottom: 3.2%;
+      transform: translateX(-50%);
+      color: rgba(255, 255, 255, 0.28);
+      font-size: clamp(12px, 1.9vh, 36px);
+      letter-spacing: 0.04em;
+      pointer-events: none;
+      user-select: none;
+      white-space: nowrap;
+    }
+
+    .hint {
+      position: absolute;
+      top: max(16px, env(safe-area-inset-top));
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 8px 12px;
+      border-radius: 999px;
+      color: rgba(255,255,255,.5);
+      font-size: 11px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      pointer-events: none;
+      opacity: 1;
+      transition: opacity 1.6s ease;
+      text-align: center;
+    }
+
+    .hint.hidden {
+      opacity: 0;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .hint { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="art" aria-label="Arte generativo interactivo"></canvas>
+  <div class="hint" id="hint">mueve · toca · arrastra</div>
+  <div class="watermark">@Captura_Casual | 2026</div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const canvas = document.getElementById("art");
+      const ctx = canvas.getContext("2d", { alpha: false });
+      const hint = document.getElementById("hint");
+
+      let width = 0;
+      let height = 0;
+      let dpr = 1;
+      let scale = 1;
+      let reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      let lastTime = performance.now();
+      let elapsed = 0;
+      let resizeToken = 0;
+
+      const pointer = {
+        x: 0.5,
+        y: 0.5,
+        tx: 0.5,
+        ty: 0.5,
+        down: false,
+        energy: 0,
+        pulse: 0
+      };
+
+      const TAU = Math.PI * 2;
+      const particles = [];
+      const sparks = [];
+      const organisms = [];
+      const smoke = [];
+
+      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+      const lerp = (a, b, t) => a + (b - a) * t;
+      const rand = (a = 0, b = 1) => a + Math.random() * (b - a);
+      const smooth = (t) => t * t * (3 - 2 * t);
+
+      function resize() {
+        const vw = Math.max(1, window.innerWidth);
+        const vh = Math.max(1, window.innerHeight);
+        const area = vw * vh;
+
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.floor(vw * dpr);
+        canvas.height = Math.floor(vh * dpr);
+        canvas.style.width = vw + "px";
+        canvas.style.height = vh + "px";
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        width = vw;
+        height = vh;
+        scale = Math.min(width, height);
+
+        const targetParticles = Math.round(clamp(area / 1150, 850, 2800));
+        rebuildParticles(targetParticles);
+        rebuildOrganisms(Math.round(clamp(scale / 60, 10, 26)));
+        rebuildSmoke(Math.round(clamp(area / 13500, 50, 130)));
+        sparks.length = 0;
+
+        // Recentramos la interacción al redimensionar para evitar un salto visual.
+        pointer.x = pointer.tx = 0.5;
+        pointer.y = pointer.ty = 0.5;
+        resizeToken++;
+      }
+
+      function rebuildParticles(count) {
+        particles.length = 0;
+        for (let i = 0; i < count; i++) {
+          const r = Math.pow(Math.random(), 0.62);
+          particles.push({
+            r,
+            a: rand(0, TAU),
+            z: rand(.25, 1.15),
+            seed: rand(0, 1000),
+            drift: rand(.00025, .0015),
+            spin: rand(.6, 1.55),
+            size: rand(.35, 1.75),
+            alpha: rand(.17, .85)
+          });
+        }
+      }
+
+      function rebuildOrganisms(count) {
+        organisms.length = 0;
+        for (let i = 0; i < count; i++) {
+          const a = TAU * i / count + rand(-.15, .15);
+          organisms.push({
+            a,
+            radius: rand(.17, .42),
+            size: rand(.018, .04),
+            phase: rand(0, TAU),
+            speed: rand(.15, .48),
+            orbit: rand(.2, .58),
+            branches: Math.floor(rand(5, 10)),
+            alpha: rand(.18, .5)
+          });
+        }
+      }
+
+      function rebuildSmoke(count) {
+        smoke.length = 0;
+        for (let i = 0; i < count; i++) {
+          smoke.push({
+            x: rand(-.1, 1.1),
+            y: rand(.52, 1.05),
+            vx: rand(-.00035, .00035),
+            vy: rand(-.0011, -.00018),
+            s: rand(.018, .065),
+            life: rand(.2, 1),
+            phase: rand(0, TAU)
+          });
+        }
+      }
+
+      function screenPoint(nx, ny) {
+        return [nx * width, ny * height];
+      }
+
+      function background(t) {
+        const g = ctx.createRadialGradient(
+          width * (0.5 + 0.02 * Math.sin(t * .11)),
+          height * (0.48 + 0.03 * Math.cos(t * .09)),
+          0,
+          width * .5,
+          height * .5,
+          Math.max(width, height) * .78
+        );
+        g.addColorStop(0, "#160f34");
+        g.addColorStop(.28, "#100a26");
+        g.addColorStop(.62, "#08061a");
+        g.addColorStop(1, "#030208");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, width, height);
+
+        const haze = ctx.createRadialGradient(
+          width * .54, height * .43, 0,
+          width * .54, height * .43, scale * .55
+        );
+        haze.addColorStop(0, "rgba(190,80,255,.10)");
+        haze.addColorStop(.38, "rgba(55,115,255,.035)");
+        haze.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = haze;
+        ctx.fillRect(0, 0, width, height);
+      }
+
+      function drawGalaxy(t) {
+        const cx = width * .5 + (pointer.x - .5) * width * .07;
+        const cy = height * .46 + (pointer.y - .5) * height * .06;
+        const maxR = scale * .54;
+
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+
+        for (const p of particles) {
+          const angle = p.a + t * p.drift * 18 * p.spin + p.r * 1.45;
+          const rr = p.r * maxR * (0.88 + .13 * Math.sin(p.seed + t * .5));
+          const warp = Math.sin(angle * 3 + p.seed + t * .6) * scale * .009 * p.r;
+          const x = cx + Math.cos(angle) * rr * (1.15 + .12 * Math.sin(t * .3)) + warp;
+          const y = cy + Math.sin(angle) * rr * .55 + Math.sin(angle * 2 + p.seed) * scale * .008;
+          const twinkle = .52 + .48 * Math.sin(p.seed * 2 + t * (1.3 + p.z));
+          const radius = p.size * (0.72 + .35 * p.z) * (0.75 + .45 * twinkle);
+          const a = p.alpha * (.55 + .45 * twinkle) * (.62 + .38 * p.z);
+
+          const warm = (Math.sin(angle * 2.1 + p.seed) + 1) / 2;
+          ctx.fillStyle = warm > .69
+            ? `rgba(255,${Math.floor(115 + warm * 85)},${Math.floor(170 + warm * 80)},${a})`
+            : `rgba(${Math.floor(80 + warm * 120)},${Math.floor(105 + (1-warm) * 105)},255,${a})`;
+          ctx.beginPath();
+          ctx.arc(x, y, Math.max(.3, radius), 0, TAU);
+          ctx.fill();
+        }
+
+        const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxR * .24);
+        core.addColorStop(0, "rgba(255,245,224,.86)");
+        core.addColorStop(.09, "rgba(255,188,222,.42)");
+        core.addColorStop(.28, "rgba(132,95,255,.16)");
+        core.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = core;
+        ctx.fillRect(cx - maxR * .25, cy - maxR * .25, maxR * .5, maxR * .5);
+
+        ctx.restore();
+      }
+
+      function fieldAngle(nx, ny, t) {
+        const dx = nx - .5;
+        const dy = ny - .46;
+        const radius = Math.sqrt(dx * dx + dy * dy) + .0001;
+        const radial = Math.sin(radius * 22 - t * 1.9 + Math.sin(dx * 7 + t) * .8);
+        const curl = 2.8 + Math.sin(radius * 9 + t * 1.1) * .75;
+        const pointerPull = Math.atan2(pointer.y - ny, pointer.x - nx);
+        const influence = Math.exp(-Math.pow(radius / .42, 2)) * .75;
+        return Math.atan2(dy, dx) + curl + radial * .52 + pointerPull * influence * .22;
+      }
+
+      function drawFluid(t) {
+        const lines = Math.round(clamp(scale / 13, 32, 86));
+        const steps = Math.round(clamp(scale / 11, 46, 105));
+        const left = -0.04;
+        const right = 1.04;
+        const top = .08;
+        const bottom = .86;
+
+        ctx.save();
+        ctx.globalCompositeOperation = "screen";
+        ctx.lineCap = "round";
+        ctx.lineWidth = Math.max(0.5, scale * .00125);
+
+        for (let l = 0; l < lines; l++) {
+          const seed = l / Math.max(1, lines - 1);
+          let nx = lerp(left, right, (seed * 1.07 + .012 * Math.sin(l * 9.17 + t * .15)) % 1.08);
+          let ny = lerp(top, bottom, seed * .94 + .03 * Math.sin(seed * 18 + t * .4));
+          nx = clamp(nx, left, right);
+          ny = clamp(ny, top, bottom);
+
+          ctx.beginPath();
+          let started = false;
+          for (let s = 0; s < steps; s++) {
+            const localT = s / (steps - 1);
+            const a = fieldAngle(nx, ny, t);
+            const speed = .0037 + .002 * Math.sin(seed * 20 + t * .5);
+            nx += Math.cos(a) * speed;
+            ny += Math.sin(a) * speed * .62;
+
+            const fold = Math.sin(nx * 18 + ny * 11 - t * 2.3 + l) * .0028;
+            ny += fold;
+
+            const [x, y] = screenPoint(nx, ny);
+            if (!started) {
+              ctx.moveTo(x, y);
+              started = true;
+            } else {
+              ctx.lineTo(x, y);
+            }
+          }
+
+          const pulse = .25 + .18 * Math.sin(seed * 17 - t * 1.2);
+          ctx.strokeStyle = `rgba(100,${Math.floor(120 + 60 * seed)},255,${Math.max(.04, pulse)})`;
+          ctx.stroke();
+        }
+
+        ctx.restore();
+      }
+
+      function drawOrbits(t) {
+        const cx = width * .5;
+        const cy = height * .48;
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+
+        for (const o of organisms) {
+          const orbit = o.orbit * scale;
+          const a = o.a + t * o.speed * .22;
+          const x = cx + Math.cos(a) * orbit * 1.16;
+          const y = cy + Math.sin(a) * orbit * .58;
+          const wobble = Math.sin(t * 1.8 + o.phase) * scale * .008;
+          const head = o.size * scale;
+
+          ctx.fillStyle = `rgba(120,210,255,${o.alpha})`;
+          ctx.beginPath();
+          ctx.arc(x, y + wobble, head * 1.18, 0, TAU);
+          ctx.fill();
+
+          ctx.strokeStyle = `rgba(210,125,255,${o.alpha * .55})`;
+          ctx.lineWidth = Math.max(.55, scale * .001);
+          ctx.beginPath();
+          ctx.moveTo(x, y + wobble);
+          for (let b = 0; b < o.branches; b++) {
+            const ba = (b / o.branches) * TAU + t * .45 + o.phase;
+            const len = head * (2.5 + 2.2 * Math.sin(t * 2 + b + o.phase));
+            const bx = x + Math.cos(ba) * len;
+            const by = y + wobble + Math.sin(ba) * len * .46;
+            ctx.moveTo(x, y + wobble);
+            ctx.quadraticCurveTo(
+              x + Math.cos(ba + .5) * len * .45,
+              y + wobble + Math.sin(ba + .5) * len * .2,
+              bx, by
+            );
+          }
+          ctx.stroke();
+        }
+
+        ctx.restore();
+      }
+
+      function drawFire(t) {
+        const cx = width * .5;
+        const baseY = height * .82;
+        const amp = scale * .18;
+        const widthBand = scale * .46;
+
+        ctx.save();
+        ctx.globalCompositeOperation = "screen";
+        ctx.lineCap = "round";
+
+        for (let layer = 0; layer < 7; layer++) {
+          const phase = t * (1.3 + layer * .09) + layer * 1.7;
+          ctx.beginPath();
+          const samples = 42;
+          for (let i = 0; i <= samples; i++) {
+            const u = i / samples;
+            const x = cx - widthBand * .5 + widthBand * u;
+            const n1 = Math.sin(u * 11.5 + phase) * amp * (.12 + layer * .012);
+            const n2 = Math.sin(u * 28 - phase * 1.7) * amp * .045;
+            const centerLift = Math.pow(Math.sin(u * Math.PI), 1.2) * amp * (.35 + layer * .05);
+            const y = baseY - centerLift - n1 - n2 - pointer.energy * amp * .35;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+
+          const strokeAlpha = .055 + layer * .011;
+          ctx.strokeStyle = layer < 2
+            ? `rgba(255,220,170,${strokeAlpha})`
+            : `rgba(218,90,255,${strokeAlpha})`;
+          ctx.lineWidth = scale * (.018 - layer * .0018);
+          ctx.shadowBlur = scale * .018;
+          ctx.shadowColor = "rgba(255,150,220,.28)";
+          ctx.stroke();
+        }
+
+        ctx.restore();
+      }
+
+      function updateSmoke(dt, t) {
+        for (const p of smoke) {
+          p.x += p.vx * dt * 60;
+          p.y += p.vy * dt * 60;
+          p.x += Math.sin(t * .7 + p.phase + p.y * 11) * .00025;
+          p.life -= dt * .045;
+          if (p.y < .18 || p.life <= 0 || p.x < -.16 || p.x > 1.16) {
+            p.x = rand(.2, .8);
+            p.y = rand(.82, 1.05);
+            p.vx = rand(-.00035, .00035);
+            p.vy = rand(-.0011, -.00018);
+            p.s = rand(.018, .065);
+            p.life = 1;
+          }
+        }
+      }
+
+      function drawSmoke(t) {
+        ctx.save();
+        ctx.globalCompositeOperation = "screen";
+        for (const p of smoke) {
+          const x = p.x * width;
+          const y = p.y * height;
+          const r = p.s * scale * (.75 + .25 * Math.sin(t + p.phase));
+          const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+          const a = Math.max(0, Math.min(1, p.life)) * .035;
+          g.addColorStop(0, `rgba(190,145,255,${a})`);
+          g.addColorStop(.55, `rgba(90,120,255,${a * .55})`);
+          g.addColorStop(1, "rgba(0,0,0,0)");
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.arc(x, y, r, 0, TAU);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      function spawnSparks(count = 2) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(-Math.PI - .3, .3);
+          sparks.push({
+            x: width * .5 + rand(-scale * .23, scale * .23),
+            y: height * .77 + rand(-scale * .02, scale * .03),
+            vx: Math.cos(a) * rand(.3, 1.8) * scale * .0007,
+            vy: Math.sin(a) * rand(.2, 1.8) * scale * .0008,
+            life: 1,
+            size: rand(.5, 1.8)
+          });
+        }
+      }
+
+      function updateSparks(dt) {
+        for (let i = sparks.length - 1; i >= 0; i--) {
+          const s = sparks[i];
+          s.x += s.vx * dt * 60;
+          s.y += s.vy * dt * 60;
+          s.vy -= scale * .000012 * dt * 60;
+          s.vx *= .993;
+          s.life -= dt * .7;
+          if (s.life <= 0) sparks.splice(i, 1);
+        }
+      }
+
+      function drawSparks() {
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        for (const s of sparks) {
+          ctx.fillStyle = `rgba(255,185,230,${s.life * .75})`;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.size * dpr * (.7 + s.life), 0, TAU);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      function drawVignette() {
+        const g = ctx.createRadialGradient(width * .5, height * .48, scale * .22, width * .5, height * .5, Math.max(width, height) * .74);
+        g.addColorStop(0, "rgba(0,0,0,0)");
+        g.addColorStop(.66, "rgba(0,0,0,.08)");
+        g.addColorStop(1, "rgba(0,0,0,.72)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, width, height);
+      }
+
+      function interaction(t, dt) {
+        const easing = reducedMotion ? .045 : .11;
+        pointer.x = lerp(pointer.x, pointer.tx, easing);
+        pointer.y = lerp(pointer.y, pointer.ty, easing);
+        pointer.energy = lerp(pointer.energy, pointer.down ? 1 : 0, .08);
+        pointer.pulse *= Math.pow(.96, dt * 60);
+
+        const centerX = .5;
+        const centerY = .48;
+        const dx = pointer.x - centerX;
+        const dy = pointer.y - centerY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < .18) pointer.energy = Math.max(pointer.energy, (.18 - dist) / .18 * .5);
+      }
+
+      function frame(now) {
+        const dt = Math.min(.033, Math.max(.001, (now - lastTime) / 1000));
+        lastTime = now;
+        elapsed += reducedMotion ? dt * .15 : dt;
+
+        interaction(elapsed, dt);
+        background(elapsed);
+        drawSmoke(elapsed);
+        drawFluid(elapsed);
+        drawGalaxy(elapsed);
+        drawOrbits(elapsed);
+        drawFire(elapsed);
+        if (!reducedMotion) spawnSparks(Math.random() < .65 ? 1 : 0);
+        updateSmoke(dt, elapsed);
+        updateSparks(dt);
+        drawSparks();
+        drawVignette();
+
+        requestAnimationFrame(frame);
+      }
+
+      function setPointer(clientX, clientY, active) {
+        pointer.tx = clamp(clientX / Math.max(1, width), 0, 1);
+        pointer.ty = clamp(clientY / Math.max(1, height), 0, 1);
+        pointer.down = active;
+        pointer.pulse = 1;
+        hint.classList.add("hidden");
+      }
+
+      canvas.addEventListener("pointermove", (e) => {
+        setPointer(e.clientX, e.clientY, pointer.down);
+        if (pointer.down) {
+          spawnSparks(2);
+        }
+      }, { passive: true });
+
+      canvas.addEventListener("pointerdown", (e) => {
+        setPointer(e.clientX, e.clientY, true);
+        spawnSparks(10);
+        try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+      }, { passive: true });
+
+      canvas.addEventListener("pointerup", (e) => {
+        setPointer(e.clientX, e.clientY, false);
+      }, { passive: true });
+
+      canvas.addEventListener("pointercancel", () => {
+        pointer.down = false;
+      }, { passive: true });
+
+      canvas.addEventListener("pointerleave", () => {
+        pointer.down = false;
+      }, { passive: true });
+
+      window.addEventListener("resize", () => {
+        clearTimeout(resize._timer);
+        resize._timer = setTimeout(resize, 60);
+      }, { passive: true });
+
+      window.addEventListener("orientationchange", () => {
+        clearTimeout(resize._timer);
+        resize._timer = setTimeout(resize, 120);
+      }, { passive: true });
+
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", () => {
+          clearTimeout(resize._timer);
+          resize._timer = setTimeout(resize, 80);
+        }, { passive: true });
+      }
+
+      document.addEventListener("visibilitychange", () => {
+        lastTime = performance.now();
+      });
+
+      resize();
+      setTimeout(() => hint.classList.add("hidden"), 4200);
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>

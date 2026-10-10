@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#020308">
+<meta name="description" content="Arte generativo interactivo: galaxia, fluidos abstractos, ondas y organismos artificiales.">
+<title>Captura Casual — Generative Organism</title>
+<style>
+  :root {
+    --bg: #020308;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: var(--bg);
+  }
+
+  body {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .stage {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    background: #020308;
+    isolation: isolate;
+  }
+
+  canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    touch-action: none;
+  }
+
+  .vignette {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(circle at 50% 50%, transparent 42%, rgba(0, 0, 0, 0.14) 67%, rgba(0, 0, 0, 0.48) 100%);
+    mix-blend-mode: multiply;
+  }
+
+  .watermark {
+    position: absolute;
+    left: 50%;
+    bottom: 3.2%;
+    transform: translateX(-50%);
+    color: rgba(255, 255, 255, 0.28);
+    font-size: clamp(12px, 1.9vh, 36px);
+    letter-spacing: 0.04em;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+  }
+
+  .hint {
+    position: absolute;
+    left: 50%;
+    top: max(18px, env(safe-area-inset-top));
+    transform: translateX(-50%);
+    padding: 7px 11px;
+    border-radius: 999px;
+    color: rgba(255, 255, 255, 0.34);
+    font-size: clamp(9px, 1.15vw, 14px);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    pointer-events: none;
+    user-select: none;
+    opacity: 0;
+    animation: hintIn 1.2s ease-out 1.3s forwards;
+  }
+
+  @keyframes hintIn {
+    to { opacity: 1; }
+  }
+
+  @media (pointer: coarse) {
+    .hint {
+      content: "toca la pantalla";
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hint {
+      animation: none;
+      opacity: 0;
+    }
+  }
+</style>
+</head>
+<body>
+<main class="stage" aria-label="Arte generativo interactivo">
+  <canvas id="art" aria-hidden="true"></canvas>
+  <div class="vignette"></div>
+  <div class="hint">mueve el puntero · toca para activar</div>
+  <div class="watermark">@Captura_Casual | 2026</div>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const canvas = document.getElementById("art");
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+
+  const state = {
+    w: 0,
+    h: 0,
+    dpr: 1,
+    scale: 1,
+    time: 0,
+    last: performance.now(),
+    pointer: { x: 0, y: 0, active: false, speed: 0, lastX: 0, lastY: 0 },
+    burst: { x: 0, y: 0, power: 0 },
+    particles: [],
+    stars: [],
+    waves: [],
+    tendrils: [],
+    seed: Math.random() * 1000,
+    reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  };
+
+  const TAU = Math.PI * 2;
+
+  function clamp(v, a, b) {
+    return Math.max(a, Math.min(b, v));
+  }
+
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+  function hash(n) {
+    const x = Math.sin(n * 127.1 + state.seed * 311.7) * 43758.5453123;
+    return x - Math.floor(x);
+  }
+
+  function noise2(x, y) {
+    const ix = Math.floor(x);
+    const iy = Math.floor(y);
+    const fx = x - ix;
+    const fy = y - iy;
+    const a = hash(ix + iy * 57.0);
+    const b = hash(ix + 1 + iy * 57.0);
+    const c = hash(ix + (iy + 1) * 57.0);
+    const d = hash(ix + 1 + (iy + 1) * 57.0);
+    const ux = fx * fx * (3 - 2 * fx);
+    const uy = fy * fy * (3 - 2 * fy);
+    return lerp(lerp(a, b, ux), lerp(c, d, ux), uy);
+  }
+
+  function fbm(x, y) {
+    let value = 0;
+    let amp = 0.5;
+    let freq = 1;
+    for (let i = 0; i < 4; i++) {
+      value += noise2(x * freq, y * freq) * amp;
+      freq *= 2;
+      amp *= 0.5;
+    }
+    return value;
+  }
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    state.w = Math.max(1, rect.width);
+    state.h = Math.max(1, rect.height);
+    state.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(state.w * state.dpr);
+    canvas.height = Math.floor(state.h * state.dpr);
+    ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+
+    state.scale = Math.min(state.w, state.h) / 900;
+    state.pointer.x = state.w * 0.5;
+    state.pointer.y = state.h * 0.5;
+
+    buildScene();
+  }
+
+  function buildScene() {
+    const area = state.w * state.h;
+    const particleCount = Math.round(clamp(area / 850, 1050, 3600));
+    const starCount = Math.round(clamp(area / 2800, 160, 700));
+    const tendrilCount = Math.round(clamp(Math.min(state.w, state.h) / 8, 85, 145));
+
+    state.particles.length = 0;
+    state.stars.length = 0;
+    state.tendrils.length = 0;
+    state.waves.length = 0;
+
+    for (let i = 0; i < starCount; i++) {
+      const angle = hash(i * 1.7) * TAU;
+      const radius = Math.pow(hash(i * 3.2), 1.65) * Math.max(state.w, state.h) * 0.78;
+      state.stars.push({
+        x: state.w * 0.5 + Math.cos(angle) * radius,
+        y: state.h * 0.5 + Math.sin(angle) * radius,
+        r: 0.35 + hash(i * 5.8) * 1.45,
+        a: 0.12 + hash(i * 8.1) * 0.42,
+        tw: hash(i * 9.4) * TAU
+      });
+    }
+
+    for (let i = 0; i < particleCount; i++) {
+      const t = i / particleCount;
+      const angle = t * TAU * 29 + hash(i * 2.31) * 0.75;
+      const radius = Math.pow(hash(i * 5.71), 0.68) * Math.min(state.w, state.h) * 0.43;
+      const cx = state.w * 0.5;
+      const cy = state.h * 0.5;
+      state.particles.push({
+        x: cx + Math.cos(angle) * radius,
+        y: cy + Math.sin(angle) * radius * 0.72,
+        px: cx,
+        py: cy,
+        vx: 0,
+        vy: 0,
+        seed: hash(i * 12.17),
+        size: 0.6 + hash(i * 2.41) * 1.95,
+        life: hash(i * 7.33),
+        hue: 175 + hash(i * 4.82) * 135,
+        orbit: radius,
+        phase: angle,
+        band: hash(i * 6.12)
+      });
+    }
+
+    for (let i = 0; i < tendrilCount; i++) {
+      const angle = (i / tendrilCount) * TAU;
+      state.tendrils.push({
+        angle,
+        length: 0.74 + hash(i * 2.44) * 0.6,
+        phase: hash(i * 9.13) * TAU,
+        width: 0.55 + hash(i * 4.17) * 1.8,
+        spin: 0.32 + hash(i * 7.91) * 1.15
+      });
+    }
+
+    for (let i = 0; i < 7; i++) {
+      state.waves.push({
+        r: 20 + i * 35,
+        life: i / 7,
+        phase: hash(i * 5.4) * TAU
+      });
+    }
+  }
+
+  function field(x, y, t) {
+    const nx = x / Math.max(1, state.w);
+    const ny = y / Math.max(1, state.h);
+    const dx = nx - 0.5;
+    const dy = ny - 0.5;
+    const radius = Math.sqrt(dx * dx + dy * dy) + 0.0001;
+
+    const n1 = fbm(nx * 3.3 + t * 0.05, ny * 3.3 - t * 0.045);
+    const n2 = fbm(nx * 6.1 - t * 0.035, ny * 6.1 + t * 0.028);
+
+    const swirl = 2.4 * Math.exp(-radius * 2.3);
+    const curl = Math.sin((radius * 21.0) - t * 1.4 + n1 * 4.0) * 0.7;
+    const ang = Math.atan2(dy, dx);
+    const radialWave = Math.sin(ang * 5.0 + radius * 18.0 - t * 1.1) * 0.32;
+
+    let vx = -dy * swirl + (n1 - 0.5) * 0.85 + Math.cos(ang * 3.0 + t) * radialWave + curl * (-dy);
+    let vy = dx * swirl + (n2 - 0.5) * 0.85 + Math.sin(ang * 3.0 + t) * radialWave + curl * dx;
+
+    const core = Math.exp(-radius * 8.5);
+    vx += Math.sin(t * 0.9 + y * 0.018) * 0.18 * core;
+    vy += Math.cos(t * 0.85 + x * 0.018) * 0.18 * core;
+
+    return { vx, vy };
+  }
+
+  function respawn(p, mode = 0) {
+    const cx = state.w * 0.5;
+    const cy = state.h * 0.5;
+    const a = Math.random() * TAU;
+    let r;
+
+    if (mode === 1) {
+      r = Math.min(state.w, state.h) * (0.05 + Math.random() * 0.16);
+    } else {
+      r = Math.min(state.w, state.h) * (0.15 + Math.random() * 0.34);
+    }
+
+    p.x = cx + Math.cos(a) * r;
+    p.y = cy + Math.sin(a) * r * 0.7;
+    p.px = p.x;
+    p.py = p.y;
+    p.vx = 0;
+    p.vy = 0;
+    p.life = 0.15 + Math.random() * 0.85;
+  }
+
+  function spawnBurst(x, y, power = 1) {
+    state.burst.x = x;
+    state.burst.y = y;
+    state.burst.power = clamp(power, 0, 2);
+
+    for (let i = 0; i < 5; i++) {
+      const a = Math.random() * TAU;
+      state.waves.push({
+        r: 4 + i * 10,
+        life: 0,
+        phase: a
+      });
+    }
+
+    const count = Math.min(220, Math.round(70 * power));
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * TAU;
+      const speed = (1.2 + Math.random() * 3.6) * power;
+      const p = state.particles[(Math.random() * state.particles.length) | 0];
+      if (!p) continue;
+      p.x = x;
+      p.y = y;
+      p.px = x;
+      p.py = y;
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      p.life = 0.8 + Math.random() * 0.4;
+    }
+  }
+
+  function drawBackground(t) {
+    const cx = state.w * 0.5;
+    const cy = state.h * 0.5;
+    const minDim = Math.min(state.w, state.h);
+
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "rgba(2, 3, 8, 0.18)";
+    ctx.fillRect(0, 0, state.w, state.h);
+
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, minDim * 0.62);
+    g.addColorStop(0, "rgba(55, 95, 135, 0.18)");
+    g.addColorStop(0.22, "rgba(25, 58, 105, 0.12)");
+    g.addColorStop(0.55, "rgba(5, 17, 45, 0.07)");
+    g.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, state.w, state.h);
+
+    const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, minDim * 0.18);
+    core.addColorStop(0, "rgba(220, 255, 245, 0.20)");
+    core.addColorStop(0.16, "rgba(120, 235, 255, 0.10)");
+    core.addColorStop(0.46, "rgba(115, 110, 255, 0.04)");
+    core.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = core;
+    ctx.fillRect(0, 0, state.w, state.h);
+  }
+
+  function drawStars(t) {
+    ctx.globalCompositeOperation = "screen";
+    for (let i = 0; i < state.stars.length; i++) {
+      const s = state.stars[i];
+      const twinkle = 0.65 + Math.sin(t * 0.9 + s.tw) * 0.35;
+      ctx.fillStyle = `rgba(225, 245, 255, ${s.a * twinkle})`;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, TAU);
+      ctx.fill();
+    }
+  }
+
+  function drawTendrils(t) {
+    const cx = state.w * 0.5;
+    const cy = state.h * 0.5;
+    const minDim = Math.min(state.w, state.h);
+    const maxLen = minDim * 0.47;
+
+    ctx.globalCompositeOperation = "screen";
+    ctx.lineCap = "round";
+
+    for (let i = 0; i < state.tendrils.length; i++) {
+      const q = state.tendrils[i];
+      const steps = 44;
+      let x = cx;
+      let y = cy;
+      let prevX = x;
+      let prevY = y;
+
+      for (let j = 1; j <= steps; j++) {
+        const u = j / steps;
+        const ang =
+          q.angle +
+          Math.sin(u * 5.4 + t * q.spin + q.phase) * (0.18 + u * 0.72) +
+          Math.sin(u * 12.0 - t * 0.7 + q.phase) * 0.045;
+
+        const radius = u * u * maxLen * q.length;
+        const drift = Math.sin(t * 0.7 + q.phase + u * 9) * minDim * 0.006;
+
+        x = cx + Math.cos(ang) * radius + Math.cos(ang + Math.PI * 0.5) * drift;
+        y = cy + Math.sin(ang) * radius * 0.68 + Math.sin(ang + Math.PI * 0.5) * drift;
+
+        const alpha = 0.018 + (1 - u) * 0.07;
+        const hue = 160 + 80 * Math.sin(q.phase + i * 0.1 + t * 0.22);
+
+        ctx.strokeStyle = `hsla(${hue}, 90%, 68%, ${alpha})`;
+        ctx.lineWidth = q.width * (0.45 + u * 0.8);
+
+        ctx.beginPath();
+        ctx.moveTo(prevX, prevY);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+
+        prevX = x;
+        prevY = y;
+      }
+    }
+  }
+
+  function drawWaves(t, dt) {
+    const cx = state.w * 0.5;
+    const cy = state.h * 0.5;
+    const maxR = Math.max(state.w, state.h) * 0.72;
+
+    ctx.globalCompositeOperation = "screen";
+    ctx.lineWidth = Math.max(0.7, 1.1 * state.scale);
+
+    for (let i = state.waves.length - 1; i >= 0; i--) {
+      const wv = state.waves[i];
+      wv.life += dt * 0.22;
+      wv.r += dt * maxR * 0.11;
+
+      if (wv.life > 1.15) {
+        state.waves.splice(i, 1);
+        continue;
+      }
+
+      const fade = Math.pow(1 - wv.life / 1.15, 1.7);
+      ctx.strokeStyle = `rgba(130, 230, 255, ${0.08 * fade})`;
+      ctx.beginPath();
+
+      const segments = 96;
+      for (let s = 0; s <= segments; s++) {
+        const a = (s / segments) * TAU;
+        const wave = Math.sin(a * 7.0 + wv.phase + t * 1.5) * 7 * state.scale;
+        const rr = wv.r + wave;
+        const x = cx + Math.cos(a) * rr;
+        const y = cy + Math.sin(a) * rr * 0.72;
+        if (s === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    if (state.burst.power > 0.001) {
+      state.burst.power *= Math.pow(0.01, dt);
+    }
+  }
+
+  function drawParticles(t, dt) {
+    const cx = state.w * 0.5;
+    const cy = state.h * 0.5;
+    const minDim = Math.min(state.w, state.h);
+    const pointer = state.pointer;
+    const interactionRadius = minDim * 0.22;
+    const interactionRadius2 = interactionRadius * interactionRadius;
+
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineCap = "round";
+
+    const speedFactor = state.reducedMotion ? 0.33 : 1;
+
+    for (let i = 0; i < state.particles.length; i++) {
+      const p = state.particles[i];
+
+      const f = field(p.x, p.y, t);
+      p.px = p.x;
+      p.py = p.y;
+
+      p.vx = p.vx * 0.91 + f.vx * 0.46;
+      p.vy = p.vy * 0.91 + f.vy * 0.46;
+
+      const dx = pointer.x - p.x;
+      const dy = pointer.y - p.y;
+      const d2 = dx * dx + dy * dy;
+
+      if (pointer.active && d2 < interactionRadius2) {
+        const d = Math.sqrt(d2) + 0.001;
+        const falloff = 1 - d / interactionRadius;
+        const pull = falloff * falloff * (pointer.speed > 3 ? 0.45 : -0.27);
+        p.vx += (dx / d) * pull;
+        p.vy += (dy / d) * pull;
+        p.vx += -dy / d * falloff * 0.16;
+        p.vy += dx / d * falloff * 0.16;
+      }
+
+      if (state.burst.power > 0.001) {
+        const bx = p.x - state.burst.x;
+        const by = p.y - state.burst.y;
+        const bd2 = bx * bx + by * by + 1;
+        const inv = 1 / Math.sqrt(bd2);
+        const blast = 0.00085 * state.burst.power * minDim;
+        p.vx += bx * inv * blast;
+        p.vy += by * inv * blast;
+      }
+
+      p.x += p.vx * speedFactor * (0.72 + p.band * 0.8);
+      p.y += p.vy * speedFactor * (0.72 + p.band * 0.8);
+
+      const centerDx = p.x - cx;
+      const centerDy = (p.y - cy) / 0.72;
+      const centerR = Math.sqrt(centerDx * centerDx + centerDy * centerDy);
+
+      if (
+        p.x < -40 || p.x > state.w + 40 ||
+        p.y < -40 || p.y > state.h + 40 ||
+        centerR > minDim * 0.6
+      ) {
+        respawn(p, p.seed > 0.64 ? 1 : 0);
+      }
+
+      p.life += dt * (0.045 + p.seed * 0.11);
+      if (p.life > 1.35) {
+        respawn(p);
+      }
+
+      const alpha = clamp(
+        0.04 +
+        (1 - Math.abs(centerR / (minDim * 0.55))) * 0.12 +
+        (0.5 + 0.5 * Math.sin(p.phase + t * 1.8)) * 0.08,
+        0.015,
+        0.34
+      );
+
+      const hue = p.hue + Math.sin(t * 0.14 + p.seed * 5) * 15;
+      const light = 62 + (1 - p.band) * 25;
+      ctx.strokeStyle = `hsla(${hue}, 92%, ${light}%, ${alpha})`;
+      ctx.lineWidth = p.size * (0.45 + p.band * 0.7) * state.scale;
+
+      ctx.beginPath();
+      ctx.moveTo(p.px, p.py);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+    }
+  }
+
+  function drawCore(t) {
+    const cx = state.w * 0.5;
+    const cy = state.h * 0.5;
+    const minDim = Math.min(state.w, state.h);
+
+    ctx.globalCompositeOperation = "screen";
+
+    const pulse = 1 + Math.sin(t * 2.1) * 0.035 + Math.sin(t * 4.7) * 0.014;
+    const r = minDim * 0.055 * pulse;
+
+    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 5.4);
+    glow.addColorStop(0, "rgba(246, 255, 244, 0.86)");
+    glow.addColorStop(0.08, "rgba(180, 255, 240, 0.56)");
+    glow.addColorStop(0.22, "rgba(90, 210, 255, 0.24)");
+    glow.addColorStop(0.55, "rgba(110, 120, 255, 0.06)");
+    glow.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * 5.5, 0, TAU);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.fillStyle = "rgba(245, 255, 250, 0.9)";
+    ctx.arc(cx, cy, r * 0.44, 0, TAU);
+    ctx.fill();
+
+    ctx.globalCompositeOperation = "lighter";
+    for (let ring = 0; ring < 4; ring++) {
+      const rr = r * (1.45 + ring * 0.72);
+      ctx.strokeStyle = `rgba(155, 244, 255, ${0.07 - ring * 0.012})`;
+      ctx.lineWidth = Math.max(0.7, (2.4 - ring * 0.35) * state.scale);
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rr, rr * (0.7 + 0.05 * Math.sin(t + ring)), 0, 0, TAU);
+      ctx.stroke();
+    }
+  }
+
+  function frame(now) {
+    const elapsed = Math.min(48, now - state.last);
+    const dt = elapsed / 1000;
+    state.last = now;
+    state.time += dt;
+
+    const t = state.time;
+
+    drawBackground(t);
+    drawStars(t);
+    drawTendrils(t);
+    drawWaves(t, dt);
+    drawParticles(t, dt);
+    drawCore(t);
+
+    requestAnimationFrame(frame);
+  }
+
+  function pointerMove(x, y) {
+    const dx = x - state.pointer.lastX;
+    const dy = y - state.pointer.lastY;
+    state.pointer.speed = Math.min(30, Math.hypot(dx, dy));
+    state.pointer.x = x;
+    state.pointer.y = y;
+    state.pointer.lastX = x;
+    state.pointer.lastY = y;
+    state.pointer.active = true;
+  }
+
+  canvas.addEventListener("pointermove", (event) => {
+    pointerMove(event.clientX, event.clientY);
+  }, { passive: true });
+
+  canvas.addEventListener("pointerdown", (event) => {
+    pointerMove(event.clientX, event.clientY);
+    const force = event.pointerType === "touch" ? 1.35 : 1.0;
+    spawnBurst(event.clientX, event.clientY, force);
+  }, { passive: true });
+
+  canvas.addEventListener("pointerleave", () => {
+    state.pointer.active = false;
+    state.pointer.speed *= 0.3;
+  });
+
+  canvas.addEventListener("pointercancel", () => {
+    state.pointer.active = false;
+  });
+
+  window.addEventListener("resize", resize, { passive: true });
+  window.addEventListener("orientationchange", resize, { passive: true });
+
+  document.addEventListener("visibilitychange", () => {
+    state.last = performance.now();
+  });
+
+  resize();
+  ctx.fillStyle = "#020308";
+  ctx.fillRect(0, 0, state.w, state.h);
+
+  for (let i = 0; i < 3; i++) {
+    spawnBurst(
+      state.w * (0.44 + Math.random() * 0.12),
+      state.h * (0.44 + Math.random() * 0.12),
+      0.25 + i * 0.08
+    );
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

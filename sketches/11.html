@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Campo de flujo generativo</title>
+<style>
+  :root { color-scheme: dark; }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #05060a;
+    overflow: hidden;
+  }
+
+  #stage {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+  }
+
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    cursor: crosshair;
+  }
+
+  .hint {
+    position: absolute;
+    left: 50%;
+    top: 6%;
+    transform: translateX(-50%);
+    color: rgba(255, 255, 255, 0.32);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: clamp(10px, 1.4vh, 15px);
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+    opacity: 1;
+    transition: opacity 1.4s ease;
+  }
+
+  .hint.hide { opacity: 0; }
+
+  .watermark {
+    position: absolute;
+    left: 50%;
+    bottom: 3.2%;
+    transform: translateX(-50%);
+    color: rgba(255, 255, 255, 0.28);
+    font-size: clamp(12px, 1.9vh, 36px);
+    letter-spacing: 0.04em;
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="scene"></canvas>
+    <div class="hint" id="hint">Mueve el cursor &nbsp;·&nbsp; toca la pantalla</div>
+    <div class="watermark">@Captura_Casual | 2026</div>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  var canvas = document.getElementById('scene');
+  var ctx = canvas.getContext('2d', { alpha: false });
+  var hint = document.getElementById('hint');
+
+  var W = 1, H = 1, DPR = 1;
+  var fieldScale = 0.004;
+  var baseSpeed = 1.6;
+  var time = 0;
+
+  /* ------------------------------------------------------------------
+     Ruido de Perlin 2D. Se usa para construir el campo de direcciones
+     que guia a las particulas.
+  ------------------------------------------------------------------ */
+
+  var PERM = new Uint8Array(512);
+
+  (function buildPerm() {
+    var p = new Uint8Array(256);
+    var i;
+    for (i = 0; i < 256; i++) p[i] = i;
+
+    var seed = 20260101;
+    function rnd() {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 4294967296;
+    }
+
+    for (i = 255; i > 0; i--) {
+      var j = Math.floor(rnd() * (i + 1));
+      var t = p[i]; p[i] = p[j]; p[j] = t;
+    }
+    for (i = 0; i < 512; i++) PERM[i] = p[i & 255];
+  })();
+
+  function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function grad2(h, x, y) {
+    switch (h & 7) {
+      case 0: return  x + y;
+      case 1: return -x + y;
+      case 2: return  x - y;
+      case 3: return -x - y;
+      case 4: return  x;
+      case 5: return -x;
+      case 6: return  y;
+      default: return -y;
+    }
+  }
+
+  function noise2(x, y) {
+    var xi = Math.floor(x), yi = Math.floor(y);
+    var X = xi & 255, Y = yi & 255;
+    var xf = x - xi, yf = y - yi;
+    var u = fade(xf), v = fade(yf);
+
+    var aa = PERM[PERM[X] + Y];
+    var ab = PERM[PERM[X] + Y + 1];
+    var ba = PERM[PERM[X + 1] + Y];
+    var bb = PERM[PERM[X + 1] + Y + 1];
+
+    var x1 = lerp(grad2(aa, xf, yf), grad2(ba, xf - 1, yf), u);
+    var x2 = lerp(grad2(ab, xf, yf - 1), grad2(bb, xf - 1, yf - 1), u);
+
+    return lerp(x1, x2, v) * 0.72;
+  }
+
+  /* ------------------------------------------------------------------
+     Estado
+  ------------------------------------------------------------------ */
+
+  var particles = [];
+  var ripples = [];
+  var pointer = { x: -9999, y: -9999, active: false };
+
+  function makeParticle(p) {
+    p = p || {};
+    p.x = Math.random() * W;
+    p.y = Math.random() * H;
+    p.vx = 0;
+    p.vy = 0;
+    p.life = Math.random() * 400;
+    p.maxLife = 500 + Math.random() * 1200;
+    p.hue = Math.random();
+    p.w = 0.7 + Math.random() * 1.1;
+    return p;
+  }
+
+  function buildParticles() {
+    var target = Math.round(Math.min(1100, Math.max(260, (W * H) / 1200)));
+    particles.length = 0;
+    for (var i = 0; i < target; i++) particles.push(makeParticle());
+  }
+
+  /* ------------------------------------------------------------------
+     Redimensionado responsivo
+  ------------------------------------------------------------------ */
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.max(1, window.innerWidth);
+    H = Math.max(1, window.innerHeight);
+
+    canvas.width = Math.round(W * DPR);
+    canvas.height = Math.round(H * DPR);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#05060a';
+    ctx.fillRect(0, 0, W, H);
+
+    var minDim = Math.min(W, H);
+    fieldScale = 2.0 / minDim;
+    baseSpeed = Math.max(0.8, Math.min(2.6, minDim / 500));
+
+    buildParticles();
+  }
+
+  /* ------------------------------------------------------------------
+     Interaccion
+  ------------------------------------------------------------------ */
+
+  function hideHint() {
+    if (hint) hint.classList.add('hide');
+  }
+
+  function addRipple(x, y) {
+    if (ripples.length > 4) ripples.shift();
+    ripples.push({
+      x: x,
+      y: y,
+      r: 8,
+      maxR: Math.max(W, H) * 0.62,
+      speed: 6.5,
+      power: 7.5,
+      alpha: 0.5,
+      hue: 185 + Math.random() * 130
+    });
+  }
+
+  function localPoint(e) {
+    var r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  canvas.addEventListener('pointermove', function (e) {
+    var p = localPoint(e);
+    pointer.x = p.x;
+    pointer.y = p.y;
+    pointer.active = true;
+  }, { passive: true });
+
+  canvas.addEventListener('pointerdown', function (e) {
+    var p = localPoint(e);
+    pointer.x = p.x;
+    pointer.y = p.y;
+    pointer.active = true;
+    addRipple(p.x, p.y);
+    hideHint();
+  }, { passive: true });
+
+  canvas.addEventListener('pointerleave', function () {
+    pointer.active = false;
+  });
+
+  canvas.addEventListener('pointercancel', function () {
+    pointer.active = false;
+  });
+
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', function () {
+    setTimeout(resize, 120);
+  });
+
+  setTimeout(hideHint, 7000);
+
+  /* ------------------------------------------------------------------
+     Bucle principal
+  ------------------------------------------------------------------ */
+
+  function step(dt) {
+    var t = time;
+    var i, k, p;
+
+    // Desvanecido del cuadro anterior: genera las estelas.
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(5, 6, 10, 0.085)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+
+    var phase = t * 0.45;
+    var s = fieldScale;
+    var sp = baseSpeed;
+
+    for (i = 0; i < particles.length; i++) {
+      p = particles[i];
+
+      // Direccion del campo de flujo en la posicion actual.
+      var n1 = noise2(p.x * s + 11.3, p.y * s + t * 0.16);
+      var n2 = noise2(p.x * s * 2.6 - 5.7, p.y * s * 2.6 - t * 0.12);
+      var ang = (n1 * 0.8 + n2 * 0.4) * Math.PI * 1.7;
+
+      var tvx = Math.cos(ang) * sp;
+      var tvy = Math.sin(ang) * sp;
+
+      // Remolino alrededor del puntero.
+      if (pointer.active) {
+        var dx = p.x - pointer.x;
+        var dy = p.y - pointer.y;
+        var d2 = dx * dx + dy * dy;
+        var R = 175;
+        if (d2 < R * R && d2 > 0.02) {
+          var d = Math.sqrt(d2);
+          var f = 1 - d / R;
+          var ux = dx / d;
+          var uy = dy / d;
+          var swirl = 6.5 * f;
+          tvx += -uy * swirl + ux * swirl * 0.34;
+          tvy +=  ux * swirl + uy * swirl * 0.34;
+        }
+      }
+
+      // Ondas expansivas creadas al hacer clic.
+      for (k = 0; k < ripples.length; k++) {
+        var rp = ripples[k];
+        var ox = p.x - rp.x;
+        var oy = p.y - rp.y;
+        var od = Math.sqrt(ox * ox + oy * oy) || 0.001;
+        var band = Math.abs(od - rp.r);
+        if (band < 46) {
+          var bf = (1 - band / 46) * rp.power;
+          tvx += (ox / od) * bf;
+          tvy += (oy / od) * bf;
+        }
+      }
+
+      // Integracion suavizada.
+      p.vx += (tvx - p.vx) * 0.14 * dt;
+      p.vy += (tvy - p.vy) * 0.14 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.life += dt;
+
+      if (p.life > p.maxLife ||
+          p.x < -80 || p.x > W + 80 ||
+          p.y < -80 || p.y > H + 80) {
+        makeParticle(p);
+        continue;
+      }
+
+      var hue = 250 + 80 * Math.sin(phase + p.hue * 6.2832);
+      var light = 56 + 12 * Math.sin(p.hue * 31.4 + t * 3);
+
+      ctx.strokeStyle = 'hsla(' + hue.toFixed(0) + ', 92%, ' + light.toFixed(0) + '%, 0.30)';
+      ctx.lineWidth = p.w;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - p.vx * 2.6, p.y - p.vy * 2.6);
+      ctx.stroke();
+    }
+
+    // Anillos de las ondas.
+    for (k = ripples.length - 1; k >= 0; k--) {
+      var ring = ripples[k];
+      ring.r += ring.speed * dt;
+      ring.power *= Math.pow(0.93, dt);
+      ring.alpha *= Math.pow(0.955, dt);
+
+      if (ring.r > ring.maxR || ring.alpha < 0.012) {
+        ripples.splice(k, 1);
+        continue;
+      }
+
+      ctx.beginPath();
+      ctx.arc(ring.x, ring.y, ring.r, 0, Math.PI * 2);
+      ctx.strokeStyle = 'hsla(' + ring.hue.toFixed(0) + ', 95%, 66%, ' + ring.alpha.toFixed(3) + ')';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    // Halo suave bajo el puntero.
+    if (pointer.active) {
+      var g = ctx.createRadialGradient(pointer.x, pointer.y, 0, pointer.x, pointer.y, 190);
+      g.addColorStop(0, 'rgba(120, 200, 255, 0.085)');
+      g.addColorStop(0.5, 'rgba(150, 120, 255, 0.035)');
+      g.addColorStop(1, 'rgba(120, 200, 255, 0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(pointer.x, pointer.y, 190, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  var last = performance.now();
+
+  function loop(now) {
+    requestAnimationFrame(loop);
+
+    var raw = now - last;
+    last = now;
+
+    var dt = raw / 16.6667;
+    if (!isFinite(dt) || dt <= 0) dt = 1;
+    dt = Math.max(0.2, Math.min(2.5, dt));
+
+    time += dt / 60;
+    step(dt);
+  }
+
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
