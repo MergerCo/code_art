@@ -60,8 +60,31 @@ const artworks = [
     descripcion: "A living kaleidoscope of light, symmetry, and motion. Every frame is coded in real time, never repeated."
   },
 
+  {
+    titulo: "Generative flow field of particles",
+    archivo: "11.html",
+    descripcion: "Soft trails shift between blue and violet as they drift across the frame."
+  },
 
-  
-  
+  {
+    titulo: "Nebular Organism",
+    archivo: "12.html",
+    descripcion: "A fluid nebula moves in the background while small particles drift, connect, and respond to touch or cursor movement."
+  },
+
+  {
+    titulo: "An interactive generative artwork",
+    archivo: "13.html",
+    descripcion: "Particles drift through a slow flow field, forming soft galaxy shapes, waves, and artificial organisms."
+  },
+
+  {
+    titulo: "Interactive generative art",
+    archivo: "14.html",
+    descripcion: "A dark scene with a slow galaxy, flowing lines, soft smoke, and small orbital forms. It responds to touch or cursor movement."
+  },
+
+
+    
   // Añade más obras aquí...
 ];
